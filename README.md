@@ -15,6 +15,7 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `my_videos` | This account's videos with review state and rejection reasons |
 | `video_info` | Full metadata of one video — reuse its tid / tags / source as a template |
 | `zones` | Zone list (分区) with `tid` values |
+| `trending` | What's hot site-wide right now (排行榜 + 综合热门 + 每周必看, ~230 titles) for studying title patterns |
 
 ## Install
 
@@ -34,6 +35,8 @@ A newly added server only shows up after restarting the Claude Code session.
   takes minutes and the CLI prints the resulting BV id (the Python `upload()`
   binding returns nothing). Each job writes `jobs/<id>.log` and `jobs/<id>.json`.
 - **Read-only views** call the creator-center web APIs with the same cookies.
+  Endpoints that answer `-352` (risk control) need a WBI signature; `wbi_get`
+  adds it (keys from the nav API, rotated daily).
 
 ## Gotchas
 

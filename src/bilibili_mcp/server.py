@@ -108,6 +108,30 @@ def web_get(url: str, params: dict[str, Any] | None = None) -> Any:
     return body.get("data")
 
 
+# WBI request signing: some endpoints answer -352 without it. The mixing table is
+# fixed by Bilibili's web client; the keys come from the nav API and rotate daily.
+_WBI_MIXIN = [
+    46, 47, 18, 2, 53, 8, 23, 32, 15, 50, 10, 31, 58, 3, 45, 35, 27, 43, 5, 49,
+    33, 9, 42, 19, 29, 28, 14, 39, 12, 38, 41, 13, 37, 48, 7, 16, 24, 55, 40,
+    61, 26, 17, 0, 1, 60, 51, 30, 4, 22, 25, 54, 21, 56, 59, 6, 63, 57, 62, 11,
+    36, 20, 34, 44, 52,
+]
+
+
+def wbi_get(url: str, params: dict[str, Any]) -> Any:
+    """`web_get` with a WBI signature (``w_rid`` / ``wts``) added to the query."""
+    import hashlib
+    from urllib.parse import urlencode
+
+    img = web_get("https://api.bilibili.com/x/web-interface/nav").get("wbi_img", {})
+    raw = Path(img["img_url"]).stem + Path(img["sub_url"]).stem
+    key = "".join(raw[i] for i in _WBI_MIXIN)[:32]
+    signed = {**params, "wts": int(time.time())}
+    signed = {k: re.sub(r"[!'()*]", "", str(v)) for k, v in sorted(signed.items())}
+    signed["w_rid"] = hashlib.md5((urlencode(signed) + key).encode()).hexdigest()  # noqa: S324 - protocol-mandated
+    return web_get(url, signed)
+
+
 def whoami() -> dict[str, Any]:
     data = web_get("https://api.bilibili.com/x/web-interface/nav")
     if not data.get("isLogin"):
@@ -413,6 +437,57 @@ def video_info(bvid: str) -> dict[str, Any]:
             for v in data.get("videos") or []
         ],
     }
+
+
+def _trend_row(item: dict[str, Any], src: str) -> dict[str, Any]:
+    stat = item.get("stat", {})
+    reason = (item.get("rcmd_reason") or {}).get("content") if isinstance(item.get("rcmd_reason"), dict) else item.get("rcmd_reason")
+    return {
+        "title": item.get("title"),
+        "zone": item.get("tnamev2") or item.get("tname"),
+        "views": stat.get("view"),
+        "likes": stat.get("like"),
+        "pub": datetime.fromtimestamp(item["pubdate"]).strftime("%m-%d") if item.get("pubdate") else None,
+        "from": src,
+        **({"reason": reason} if reason else {}),
+        "bvid": item.get("bvid"),
+    }
+
+
+@mcp.tool(annotations=READ_ONLY)
+def trending(sources: list[str] | None = None, popular_pages: int = 2, rid: int = 0) -> dict[str, Any]:
+    """Titles of what is hot on Bilibili right now, across all zones, for studying title patterns.
+
+    sources: any of "ranking" (全站排行榜, top 100), "popular" (综合热门, 50 per page),
+        "weekly" (latest 每周必看). Default: all three, de-duplicated by bvid.
+    popular_pages: pages of 综合热门 to fetch (1-10).
+    rid: restrict the ranking to one top-level zone (0 = all zones; see `zones`).
+    """
+    sources = sources or ["ranking", "popular", "weekly"]
+    rows: dict[str, dict[str, Any]] = {}
+    meta: dict[str, Any] = {}
+
+    def add(items: list[dict[str, Any]], src: str) -> None:
+        for item in items:
+            rows.setdefault(item.get("bvid"), _trend_row(item, src))
+
+    if "ranking" in sources:
+        add(web_get("https://api.bilibili.com/x/web-interface/ranking/v2", {"rid": rid, "type": "all"}).get("list") or [], "ranking")
+    if "popular" in sources:
+        for pn in range(1, max(1, min(popular_pages, 10)) + 1):
+            data = web_get("https://api.bilibili.com/x/web-interface/popular", {"ps": 50, "pn": pn})
+            add(data.get("list") or [], "popular")
+            if data.get("no_more"):
+                break
+    if "weekly" in sources:
+        series = web_get("https://api.bilibili.com/x/web-interface/popular/series/list").get("list") or []
+        if series:
+            latest = series[0]
+            meta["weekly"] = latest.get("name")
+            add(wbi_get("https://api.bilibili.com/x/web-interface/popular/series/one",
+                        {"number": latest["number"]}).get("list") or [], "weekly")
+    return {"fetched": datetime.now().isoformat(timespec="minutes"), "count": len(rows), **meta,
+            "videos": list(rows.values())}
 
 
 @mcp.tool(annotations=READ_ONLY)
