@@ -45,6 +45,8 @@ A newly added server only shows up after restarting the Claude Code session.
   hard-linking each file as `jobs/parts-*/<n>/<title><ext>` for the upload
   (symlink, then copy, if the link fails); the folder is removed when the job
   ends. Characters Windows forbids in file names become full-width (`:` → `：`).
+- Bilibili silently drops some tags (e.g. `测试`): a test upload tagged
+  `测试,MCP` came back with only `MCP`. Check tags with `video_info` afterwards.
 - "done" in `upload_status` means the submission was accepted; the video still
   goes through review. Check `my_videos` for the outcome.
 - biliup cannot delete videos; delete test uploads in the creator center.
