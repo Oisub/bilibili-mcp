@@ -28,11 +28,19 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `subscribe` / `unsubscribe` / `subscriptions` | Follow YouTube channels (URL, @handle or channel id) |
 | `check_subscriptions` | Poll followed channels (RSS) and queue new videos |
 | `queue_playlist` | Link / sync a YouTube playlist that acts as the manual queue |
+| `youtube_login` | OAuth consent for the user's YouTube playlists (optional) |
 
 The manual queue can be managed from YouTube: link a public or unlisted playlist with
 `queue_playlist(<url>)`. Videos added to it are queued, its order is the posting
 order, and pending videos removed from it leave the queue. Posted videos may stay in
 the playlist (the queue remembers them, so nothing is posted twice).
+
+With `youtube_login` (optional) the playlist can be private, `queue_add` also adds to
+it, and each posted video is moved to a "B站已投" playlist. Setup: in Google Cloud,
+create a project, enable *YouTube Data API v3*, configure the OAuth consent screen
+(External, then **publish to production** — a Testing app's token expires after 7
+days), create an OAuth client of type *Desktop app*, download its JSON to
+`~/.bilibili-mcp/youtube_client.json`, then call `youtube_login`.
 
 State is `~/.bilibili-mcp/queue.json`. A subscription only queues videos published
 after it was added.

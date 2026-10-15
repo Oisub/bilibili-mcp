@@ -644,8 +644,8 @@ def store() -> upload_queue.Store:
 @mcp.tool()
 def queue_add(url: str, note: str = "") -> dict[str, Any]:
     """Add a YouTube video to the upload queue (the daily job posts queued videos only
-    Fri (2), Sat (2) and Sun (1), from the evening on). The user normally queues videos by
-    adding them to the queue playlist instead (see `queue_playlist`)."""
+    Fri (2), Sat (2) and Sun (1), from the evening on). With YouTube logged in it is also
+    added to the user's queue playlist (see `queue_playlist`)."""
     return upload_queue.add(store(), url, origin="manual", note=note)
 
 
@@ -685,6 +685,7 @@ def queue_finish(item_id: str, status: str, bvid: str = "", note: str = "") -> d
 
     status: done (uploaded; give bvid) | failed (can be retried) | skipped (not worth posting:
     short, not music, already on Bilibili, ...; say why in note) | pending (put it back).
+    A done video from the queue playlist is moved to the "B站已投" playlist.
     """
     return upload_queue.finish(store(), item_id, status, bvid, note)
 
@@ -693,6 +694,19 @@ def queue_finish(item_id: str, status: str, bvid: str = "", note: str = "") -> d
 def queue_remove(item_id: str) -> dict[str, Any]:
     """Delete an item from the queue."""
     return upload_queue.remove(store(), item_id)
+
+
+@mcp.tool()
+async def youtube_login() -> dict[str, Any]:
+    """Authorize access to the user's YouTube playlists (opens Google consent in the browser).
+
+    Needs the Desktop-app OAuth client JSON at ~/.bilibili-mcp/youtube_client.json.
+    Afterwards the queue playlist is read via the API, `queue_add` also adds to it, and
+    posted videos are moved to the "B站已投" playlist.
+    """
+    from bilibili_mcp.youtube import YouTube
+
+    return await asyncio.to_thread(YouTube(home()).login)
 
 
 @mcp.tool()

@@ -9,8 +9,10 @@ State lives in ``<home>/queue.json``:
 
 The user manages manual items in a YouTube playlist on their own account:
 ``sync_playlist`` queues videos added there (origin "playlist"), follows its
-order, and drops pending items that were removed from it. The playlist must be
-public or unlisted, since it is read without login.
+order, and drops pending items that were removed from it. With YouTube OAuth
+(youtube.py) the playlist is read through the API, ``add`` also puts the video
+into it, and a posted video is moved to the "posted" playlist; without it the
+playlist is read by yt-dlp and must be public or unlisted.
 
 An item moves pending -> processing -> done | failed | skipped. Manually queued
 items are posted through ``claim_next(auto=True)``, at most daily_auto_limit()
@@ -34,6 +36,8 @@ from typing import Any, Callable
 import httpx
 from mcp.server.mcpserver.exceptions import ToolError
 
+from bilibili_mcp.youtube import YouTube
+
 YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/live/)([0-9A-Za-z_-]{11})")
 CHANNEL_ID_RE = re.compile(r"\bUC[0-9A-Za-z_-]{22}\b")
 PLAYLIST_ID_RE = re.compile(r"(?:list=)?\b((?:PL|OL|UU)[0-9A-Za-z_-]{10,})")
@@ -45,6 +49,7 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # Manually queued items the daily job may post per weekday (Monday = 0): none
 # Monday to Thursday, two on Friday and Saturday, one on Sunday.
 WEEKLY_AUTO_LIMITS = (0, 0, 0, 0, 2, 2, 1)
+POSTED_PLAYLIST_TITLE = "B站已投"
 # A claimed item whose agent died is handed out again after this long.
 STALE_PROCESSING = timedelta(hours=3)
 
@@ -90,8 +95,19 @@ def watch_url(vid: str) -> str:
 # --------------------------------------------------------------------- queue
 
 
+def youtube(store: Store) -> YouTube | None:
+    """The OAuth client when the user has logged in, else None (read-only mode)."""
+    yt = YouTube(store.path.parent)
+    return yt if yt.logged_in() else None
+
+
 def add(store: Store, url: str, title: str = "", origin: str = "manual", note: str = "") -> dict[str, Any]:
     vid = video_id(url)
+    pl = store.load().get("playlist")
+    yt = youtube(store) if origin == "manual" and pl else None
+    if yt and not any(i["video_id"] == vid for i in store.load()["items"]):
+        yt.add_to_playlist(pl["id"], vid)  # the playlist stays the one place the user looks
+        origin = "playlist"
 
     def fn(data: dict[str, Any]) -> dict[str, Any]:
         for item in data["items"]:
@@ -158,10 +174,16 @@ def finish(store: Store, item_id: str, status: str, bvid: str = "", note: str = 
                     item["bvid"] = bvid
                 if note:
                     item["note"] = note
-                return item
+                return dict(item)
         raise ToolError(f"unknown queue item: {item_id}")
 
-    return store.update(fn)
+    item = store.update(fn)
+    if status == "done" and item["origin"] == "playlist":
+        try:
+            item["moved_to"] = move_posted(store, item["video_id"])
+        except Exception as exc:  # the upload itself succeeded; just report it
+            item["move_error"] = str(exc)
+    return item
 
 
 def remove(store: Store, item_id: str) -> dict[str, Any]:
@@ -282,8 +304,10 @@ def playlist_id(ref: str) -> str:
     return m.group(1)
 
 
-def fetch_playlist(pid: str) -> dict[str, Any]:
-    """Title and video ids of a playlist, in playlist order (yt-dlp, no login)."""
+def fetch_playlist(pid: str, yt: YouTube | None = None) -> dict[str, Any]:
+    """Title and video ids of a playlist, in playlist order (API if logged in, else yt-dlp)."""
+    if yt:
+        return {"title": yt.playlist_title(pid), "videos": yt.playlist_items(pid)}
     exe = os.environ.get("BILIBILI_MCP_YTDLP") or shutil.which("yt-dlp")
     if not exe:
         raise ToolError("yt-dlp not found on PATH (set BILIBILI_MCP_YTDLP)")
@@ -307,8 +331,8 @@ def fetch_playlist(pid: str) -> dict[str, Any]:
 
 def set_playlist(store: Store, ref: str) -> dict[str, Any]:
     pid = playlist_id(ref)
-    info = fetch_playlist(pid)  # fail now if it is private or wrong
-    store.update(lambda data: data.update(playlist={"id": pid, "title": info["title"]}))
+    info = fetch_playlist(pid, youtube(store))  # fail now if it is unreadable or wrong
+    store.update(lambda data: data.update(playlist={**(data.get("playlist") or {}), "id": pid, "title": info["title"]}))
     return {"id": pid, "title": info["title"], "videos": len(info["videos"]), **sync_playlist(store)}
 
 
@@ -318,7 +342,7 @@ def sync_playlist(store: Store) -> dict[str, Any]:
     pl = store.load().get("playlist")
     if not pl:
         return {"playlist": None}
-    videos = fetch_playlist(pl["id"])["videos"]
+    videos = fetch_playlist(pl["id"], youtube(store))["videos"]
     order = {v["video_id"]: n for n, v in enumerate(videos)}
 
     def fn(data: dict[str, Any]) -> dict[str, Any]:
@@ -345,3 +369,18 @@ def sync_playlist(store: Store) -> dict[str, Any]:
         return {"added": added, "removed": removed}
 
     return store.update(fn)
+
+
+def move_posted(store: Store, vid: str) -> str:
+    """Move a posted video from the queue playlist to the posted playlist (created on first use)."""
+    yt = youtube(store)
+    pl = store.load().get("playlist")
+    if not yt or not pl:
+        return ""
+    posted = pl.get("posted_id")
+    if not posted:
+        posted = yt.create_playlist(POSTED_PLAYLIST_TITLE)
+        store.update(lambda data: data["playlist"].update(posted_id=posted))
+    yt.add_to_playlist(posted, vid)  # add first: a failure in between must not lose the video
+    yt.remove_from_playlist(pl["id"], vid)
+    return posted
