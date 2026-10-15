@@ -643,7 +643,8 @@ def store() -> upload_queue.Store:
 
 @mcp.tool()
 def queue_add(url: str, note: str = "") -> dict[str, Any]:
-    """Add a YouTube video to the upload queue (the daily job posts at most one per day)."""
+    """Add a YouTube video to the upload queue (the daily job posts queued videos only
+    Fri (2), Sat (2) and Sun (1), from the evening on)."""
     return upload_queue.add(store(), url, origin="manual", note=note)
 
 
@@ -658,7 +659,10 @@ def queue_list(status: str = "open") -> dict[str, Any]:
     items = [i for i in data["items"]
              if status == "all" or (status == "open" and i["status"] in open_states) or i["status"] == status]
     return {"auto_posts_today": upload_queue.auto_posts_today(data),
-            "daily_auto_limit": upload_queue.DAILY_AUTO_LIMIT, "items": items}
+            "daily_auto_limit": upload_queue.daily_auto_limit(),
+            "weekly_auto_limits": dict(zip(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
+                                           upload_queue.WEEKLY_AUTO_LIMITS)),
+            "items": items}
 
 
 @mcp.tool()

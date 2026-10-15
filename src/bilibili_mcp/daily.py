@@ -5,7 +5,8 @@ Run by the OS scheduler every hour (Windows Task Scheduler), e.g.
 
 * polls the followed YouTube channels and queues their new videos;
 * posts every queued **subscription** video right away (no daily limit);
-* from POST_HOUR on, posts **one** manually queued video per day.
+* from POST_HOUR on, posts manually queued videos up to the weekday's limit
+  (upload_queue.WEEKLY_AUTO_LIMITS: none Mon-Thu, two Fri/Sat, one Sun).
 
 Polling is plain Python; Claude is only started when there is something to
 post, because writing the title and description is the part that needs judgment.
@@ -27,7 +28,7 @@ from datetime import datetime
 from bilibili_mcp import upload_queue
 from bilibili_mcp.server import home, store
 
-# Manually queued videos are posted from this local hour on (one per day).
+# Manually queued videos are posted from this local hour on (on allowed weekdays).
 POST_HOUR = int(os.environ.get("BILIBILI_MCP_POST_HOUR", "18"))
 
 BASE_PROMPT = """\
@@ -75,8 +76,9 @@ def plan(data: dict, now: datetime) -> list[str]:
     lines = [f"- item {i['id']} ({i['url']}): queue_claim(auto=false, item_id=\"{i['id']}\")"
              for i in pending if i["origin"].startswith("subscription:")]
     manual = [i for i in pending if not i["origin"].startswith("subscription:")]
-    if manual and now.hour >= POST_HOUR and upload_queue.auto_posts_today(data) < upload_queue.DAILY_AUTO_LIMIT:
-        lines.append("- the oldest manually queued item: queue_claim(auto=true)")
+    if now.hour >= POST_HOUR:
+        slots = upload_queue.daily_auto_limit(now) - upload_queue.auto_posts_today(data)
+        lines += ["- the oldest manually queued item: queue_claim(auto=true)"] * min(slots, len(manual))
     return lines
 
 

@@ -8,8 +8,8 @@ State lives in ``<home>/queue.json``:
     {"items": [...], "subscriptions": [...]}
 
 An item moves pending -> processing -> done | failed | skipped. Manually queued
-items are posted through ``claim_next(auto=True)``, at most DAILY_AUTO_LIMIT a
-day. Subscription videos, and anything the user asks to post now, are claimed
+items are posted through ``claim_next(auto=True)``, at most daily_auto_limit()
+a day (set per weekday in WEEKLY_AUTO_LIMITS). Subscription videos, and anything the user asks to post now, are claimed
 with ``auto=False`` and do not count toward that limit.
 """
 
@@ -33,7 +33,9 @@ NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/sche
       "media": "http://search.yahoo.com/mrss/"}
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
 
-DAILY_AUTO_LIMIT = 1
+# Manually queued items the daily job may post per weekday (Monday = 0): none
+# Monday to Thursday, two on Friday and Saturday, one on Sunday.
+WEEKLY_AUTO_LIMITS = (0, 0, 0, 0, 2, 2, 1)
 # A claimed item whose agent died is handed out again after this long.
 STALE_PROCESSING = timedelta(hours=3)
 
@@ -102,6 +104,10 @@ def _release_stale(data: dict[str, Any]) -> None:
             item["note"] = (item.get("note", "") + " [released: processing timed out]").strip()
 
 
+def daily_auto_limit(day: datetime | None = None) -> int:
+    return WEEKLY_AUTO_LIMITS[(day or datetime.now()).weekday()]
+
+
 def auto_posts_today(data: dict[str, Any]) -> int:
     today = datetime.now().date().isoformat()
     return sum(1 for i in data["items"]
@@ -113,8 +119,9 @@ def claim_next(store: Store, auto: bool, item_id: str = "") -> dict[str, Any]:
 
     def fn(data: dict[str, Any]) -> dict[str, Any]:
         _release_stale(data)
-        if auto and auto_posts_today(data) >= DAILY_AUTO_LIMIT:
-            return {"claimed": None, "reason": f"daily auto limit ({DAILY_AUTO_LIMIT}) reached"}
+        limit = daily_auto_limit()
+        if auto and auto_posts_today(data) >= limit:
+            return {"claimed": None, "reason": f"today's auto limit ({limit}) reached"}
         pending = [i for i in data["items"] if i["status"] == "pending"]
         if auto:  # subscription videos are posted on detection, outside the daily quota
             pending = [i for i in pending if not i["origin"].startswith("subscription:")]

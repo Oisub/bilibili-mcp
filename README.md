@@ -23,7 +23,7 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | Tool | What it does |
 | --- | --- |
 | `queue_add` / `queue_list` / `queue_remove` | Upload queue of YouTube videos |
-| `queue_claim` | Take one item to post (`auto=True` for the daily job, limited to one per day; `auto=False` when the user asks) |
+| `queue_claim` | Take one item to post (`auto=True` for the daily job, limited per weekday — none Mon–Thu, 2 Fri/Sat, 1 Sun; `auto=False` when the user asks) |
 | `queue_finish` | Record the outcome: done (with bvid) / failed / skipped / pending |
 | `subscribe` / `unsubscribe` / `subscriptions` | Follow YouTube channels (URL, @handle or channel id) |
 | `check_subscriptions` | Poll followed channels (RSS) and queue new videos |
@@ -36,7 +36,8 @@ Scheduler with `pythonw.exe` so no window opens). It polls subscriptions and, wh
 there is something to post, runs a headless `claude -p` that claims, writes the
 metadata, uploads and finishes each item:
 - videos from subscribed channels are posted as soon as they are found, no limit;
-- manually queued videos are posted one per day, from `BILIBILI_MCP_POST_HOUR` (default 18).
+- manually queued videos are posted from `BILIBILI_MCP_POST_HOUR` (default 18), up to a per-weekday limit
+  (`WEEKLY_AUTO_LIMITS`: none Monday–Thursday, two on Friday and Saturday, one on Sunday).
 The prompt is `~/.bilibili-mcp/daily_prompt.md` if present, else the built-in
 default in `daily.py`. Logs go to `~/.bilibili-mcp/daily/<date>.log`;
 `--dry-run` decides without starting Claude.
