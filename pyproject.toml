@@ -1,0 +1,18 @@
+[project]
+name = "bilibili-mcp"
+version = "0.1.0"
+description = "MCP server for uploading to Bilibili, built on biliup"
+requires-python = ">=3.11"
+# biliup 1.2.10+ ships only an sdist on Windows (needs a Rust toolchain);
+# 1.2.9 is the newest release with an abi3 Windows wheel.
+dependencies = ["mcp>=2.3", "biliup==1.2.9", "httpx", "segno"]
+
+[project.scripts]
+bilibili-mcp = "bilibili_mcp.server:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/bilibili_mcp"]
