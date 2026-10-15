@@ -9,6 +9,7 @@ dependencies = ["mcp>=2.3", "biliup==1.2.9", "httpx", "segno"]
 
 [project.scripts]
 bilibili-mcp = "bilibili_mcp.server:main"
+bilibili-mcp-daily = "bilibili_mcp.daily:main"
 
 [build-system]
 requires = ["hatchling"]

@@ -18,6 +18,27 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `zones` | Zone list (分区) with `tid` values |
 | `trending` | What's hot site-wide right now (排行榜 + 综合热门 + 每周必看, ~230 titles) for studying title patterns |
 
+### Queue and subscriptions
+
+| Tool | What it does |
+| --- | --- |
+| `queue_add` / `queue_list` / `queue_remove` | Upload queue of YouTube videos |
+| `queue_claim` | Take one item to post (`auto=True` for the daily job, limited to one per day; `auto=False` when the user asks) |
+| `queue_finish` | Record the outcome: done (with bvid) / failed / skipped / pending |
+| `subscribe` / `unsubscribe` / `subscriptions` | Follow YouTube channels (URL, @handle or channel id) |
+| `check_subscriptions` | Poll followed channels (RSS) and queue new videos |
+
+State is `~/.bilibili-mcp/queue.json`. A subscription only queues videos published
+after it was added.
+
+**Daily job** — `python -m bilibili_mcp.daily` (schedule it, e.g. with Windows Task
+Scheduler using `pythonw.exe` so no window opens): polls subscriptions, and if
+something is pending and today's auto quota is unused, runs a headless
+`claude -p` that claims one item, writes the metadata, uploads and finishes it.
+The prompt is `~/.bilibili-mcp/daily_prompt.md` if present, else the built-in
+default in `daily.py`. Logs go to `~/.bilibili-mcp/daily/<date>.log`;
+`--dry-run` decides without starting Claude.
+
 ## Install
 
 ```

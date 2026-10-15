@@ -37,6 +37,8 @@ import httpx
 from mcp.server.mcpserver import MCPServer
 from mcp.types import ToolAnnotations
 
+from bilibili_mcp import upload_queue
+
 mcp = MCPServer("bilibili")
 logging.getLogger("httpx").setLevel(logging.WARNING)
 
@@ -627,6 +629,86 @@ def my_videos(status: str = "all", page: int = 1, page_size: int = 10) -> dict[s
             "url": f"https://www.bilibili.com/video/{arc.get('bvid')}",
         })
     return {"total": data.get("page", {}).get("count"), "videos": items}
+
+
+# --------------------------------------------------------- queue / subscriptions
+
+
+def store() -> upload_queue.Store:
+    return upload_queue.Store(home() / "queue.json")
+
+
+@mcp.tool()
+def queue_add(url: str, note: str = "") -> dict[str, Any]:
+    """Add a YouTube video to the upload queue (the daily job posts at most one per day)."""
+    return upload_queue.add(store(), url, origin="manual", note=note)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def queue_list(status: str = "open") -> dict[str, Any]:
+    """Show the upload queue.
+
+    status: open (pending + processing + failed) | pending | done | failed | skipped | all.
+    """
+    data = store().load()
+    open_states = {"pending", "processing", "failed"}
+    items = [i for i in data["items"]
+             if status == "all" or (status == "open" and i["status"] in open_states) or i["status"] == status]
+    return {"auto_posts_today": upload_queue.auto_posts_today(data),
+            "daily_auto_limit": upload_queue.DAILY_AUTO_LIMIT, "items": items}
+
+
+@mcp.tool()
+def queue_claim(auto: bool, item_id: str = "") -> dict[str, Any]:
+    """Take one queue item to post now and mark it processing.
+
+    auto=True: the scheduled daily job. Refused once today's auto limit is used.
+    auto=False: the user explicitly asked to post (e.g. "投"); does not count toward the limit.
+    item_id: a specific item (also retries a failed one); empty takes the oldest pending.
+    Afterwards always call `queue_finish`.
+    """
+    return upload_queue.claim_next(store(), auto=auto, item_id=item_id)
+
+
+@mcp.tool()
+def queue_finish(item_id: str, status: str, bvid: str = "", note: str = "") -> dict[str, Any]:
+    """Record the outcome of a claimed item.
+
+    status: done (uploaded; give bvid) | failed (can be retried) | skipped (not worth posting:
+    short, not music, already on Bilibili, ...; say why in note) | pending (put it back).
+    """
+    return upload_queue.finish(store(), item_id, status, bvid, note)
+
+
+@mcp.tool()
+def queue_remove(item_id: str) -> dict[str, Any]:
+    """Delete an item from the queue."""
+    return upload_queue.remove(store(), item_id)
+
+
+@mcp.tool()
+def subscribe(channel: str) -> dict[str, Any]:
+    """Follow a YouTube channel (URL, @handle or UC... id). Only videos published after
+    subscribing are queued."""
+    return upload_queue.subscribe(store(), channel)
+
+
+@mcp.tool()
+def unsubscribe(channel: str) -> dict[str, Any]:
+    """Stop following a channel (by name, @handle or channel id)."""
+    return upload_queue.unsubscribe(store(), channel)
+
+
+@mcp.tool(annotations=READ_ONLY)
+def subscriptions() -> list[dict[str, Any]]:
+    """List followed YouTube channels."""
+    return [{k: v for k, v in s.items() if k != "seen"} for s in store().load()["subscriptions"]]
+
+
+@mcp.tool()
+def check_subscriptions() -> dict[str, Any]:
+    """Poll followed channels now and queue their new videos (the daily job does this too)."""
+    return upload_queue.check_subscriptions(store())
 
 
 def main() -> None:

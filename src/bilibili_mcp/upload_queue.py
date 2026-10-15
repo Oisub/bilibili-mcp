@@ -1,0 +1,251 @@
+"""Upload queue and YouTube channel subscriptions.
+
+Plain state, no judgment: the queue only remembers *which* videos to post and
+how far each got. Writing titles and descriptions stays with the agent.
+
+State lives in ``<home>/queue.json``:
+
+    {"items": [...], "subscriptions": [...]}
+
+An item moves pending -> processing -> done | failed | skipped. Items an agent
+claims through ``claim_next(auto=True)`` count toward the daily limit; posting
+an item because the user asked for it does not.
+"""
+
+from __future__ import annotations
+
+import json
+import re
+import uuid
+import xml.etree.ElementTree as ET
+from datetime import datetime, timedelta
+from pathlib import Path
+from typing import Any, Callable
+
+import httpx
+
+YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/live/)([0-9A-Za-z_-]{11})")
+CHANNEL_ID_RE = re.compile(r"\bUC[0-9A-Za-z_-]{22}\b")
+FEED = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
+NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015",
+      "media": "http://search.yahoo.com/mrss/"}
+UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0 Safari/537.36"
+
+DAILY_AUTO_LIMIT = 1
+# A claimed item whose agent died is handed out again after this long.
+STALE_PROCESSING = timedelta(hours=3)
+
+
+def _now() -> str:
+    return datetime.now().isoformat(timespec="seconds")
+
+
+class Store:
+    def __init__(self, path: Path) -> None:
+        self.path = path
+
+    def load(self) -> dict[str, Any]:
+        if not self.path.exists():
+            return {"items": [], "subscriptions": []}
+        return json.loads(self.path.read_text(encoding="utf-8"))
+
+    def save(self, data: dict[str, Any]) -> None:
+        tmp = self.path.with_suffix(".tmp")
+        tmp.write_text(json.dumps(data, ensure_ascii=False, indent=1), encoding="utf-8")
+        tmp.replace(self.path)
+
+    def update(self, fn: Callable[[dict[str, Any]], Any]) -> Any:
+        data = self.load()
+        result = fn(data)
+        self.save(data)
+        return result
+
+
+def video_id(url: str) -> str:
+    m = YT_ID_RE.search(url)
+    if m:
+        return m.group(1)
+    if re.fullmatch(r"[0-9A-Za-z_-]{11}", url.strip()):
+        return url.strip()
+    raise ValueError(f"not a YouTube video URL: {url}")
+
+
+def watch_url(vid: str) -> str:
+    return f"https://www.youtube.com/watch?v={vid}"
+
+
+# --------------------------------------------------------------------- queue
+
+
+def add(store: Store, url: str, title: str = "", origin: str = "manual", note: str = "") -> dict[str, Any]:
+    vid = video_id(url)
+
+    def fn(data: dict[str, Any]) -> dict[str, Any]:
+        for item in data["items"]:
+            if item["video_id"] == vid:
+                return {**item, "duplicate": True}
+        item = {"id": uuid.uuid4().hex[:6], "video_id": vid, "url": watch_url(vid), "title": title,
+                "origin": origin, "note": note, "status": "pending", "added": _now()}
+        data["items"].append(item)
+        return item
+
+    return store.update(fn)
+
+
+def _release_stale(data: dict[str, Any]) -> None:
+    cutoff = datetime.now() - STALE_PROCESSING
+    for item in data["items"]:
+        if item["status"] == "processing" and datetime.fromisoformat(item["claimed"]) < cutoff:
+            item["status"] = "pending"
+            item["note"] = (item.get("note", "") + " [released: processing timed out]").strip()
+
+
+def auto_posts_today(data: dict[str, Any]) -> int:
+    today = datetime.now().date().isoformat()
+    return sum(1 for i in data["items"]
+               if i.get("auto") and i["status"] in ("processing", "done") and i.get("claimed", "")[:10] == today)
+
+
+def claim_next(store: Store, auto: bool, item_id: str = "") -> dict[str, Any]:
+    """Hand out one pending item (oldest first, or `item_id`) and mark it processing."""
+
+    def fn(data: dict[str, Any]) -> dict[str, Any]:
+        _release_stale(data)
+        if auto and auto_posts_today(data) >= DAILY_AUTO_LIMIT:
+            return {"claimed": None, "reason": f"daily auto limit ({DAILY_AUTO_LIMIT}) reached"}
+        pending = [i for i in data["items"] if i["status"] == "pending"]
+        if item_id:
+            pending = [i for i in data["items"] if i["id"] == item_id and i["status"] in ("pending", "failed")]
+        if not pending:
+            return {"claimed": None, "reason": "no pending item" if not item_id else f"no claimable item {item_id}"}
+        item = pending[0]
+        item.update(status="processing", claimed=_now(), auto=auto)
+        return {"claimed": item}
+
+    return store.update(fn)
+
+
+def finish(store: Store, item_id: str, status: str, bvid: str = "", note: str = "") -> dict[str, Any]:
+    if status not in ("done", "failed", "skipped", "pending"):
+        raise ValueError("status must be done, failed, skipped or pending")
+
+    def fn(data: dict[str, Any]) -> dict[str, Any]:
+        for item in data["items"]:
+            if item["id"] == item_id:
+                item.update(status=status, finished=_now())
+                if bvid:
+                    item["bvid"] = bvid
+                if note:
+                    item["note"] = note
+                return item
+        raise ValueError(f"unknown queue item: {item_id}")
+
+    return store.update(fn)
+
+
+def remove(store: Store, item_id: str) -> dict[str, Any]:
+    def fn(data: dict[str, Any]) -> dict[str, Any]:
+        for i, item in enumerate(data["items"]):
+            if item["id"] == item_id:
+                return data["items"].pop(i)
+        raise ValueError(f"unknown queue item: {item_id}")
+
+    return store.update(fn)
+
+
+# ------------------------------------------------------------- subscriptions
+
+
+def resolve_channel(ref: str) -> dict[str, str]:
+    """Channel id and name from a channel URL, @handle or UC... id."""
+    ref = ref.strip()
+    if CHANNEL_ID_RE.fullmatch(ref):
+        url = f"https://www.youtube.com/channel/{ref}"
+    elif ref.startswith("@"):
+        url = f"https://www.youtube.com/{ref}"
+    elif ref.startswith("http"):
+        url = ref
+    else:
+        url = f"https://www.youtube.com/@{ref}"
+    headers = {"User-Agent": UA, "Accept-Language": "en"}
+    with httpx.Client(headers=headers, timeout=20, follow_redirects=True,
+                      cookies={"CONSENT": "YES+1", "SOCS": "CAI"}) as client:
+        html = client.get(url).text
+    m = re.search(r'"externalId":"(UC[0-9A-Za-z_-]{22})"', html) or \
+        re.search(r'<meta itemprop="identifier" content="(UC[0-9A-Za-z_-]{22})"', html) or \
+        re.search(r'"channelId":"(UC[0-9A-Za-z_-]{22})"', html)
+    if not m:
+        raise RuntimeError(f"could not find a channel id on {url}")
+    name = re.search(r'<meta property="og:title" content="([^"]*)"', html)
+    return {"channel_id": m.group(1), "name": name.group(1) if name else ref}
+
+
+def fetch_feed(channel_id: str) -> list[dict[str, str]]:
+    """Latest uploads of a channel (YouTube RSS, newest first, ~15 entries)."""
+    resp = httpx.get(FEED.format(channel_id), headers={"User-Agent": UA}, timeout=20)
+    resp.raise_for_status()
+    root = ET.fromstring(resp.text)
+    out = []
+    for entry in root.findall("a:entry", NS):
+        link = entry.find("a:link", NS)
+        out.append({
+            "video_id": entry.findtext("yt:videoId", namespaces=NS),
+            "title": entry.findtext("a:title", namespaces=NS) or "",
+            "published": entry.findtext("a:published", namespaces=NS) or "",
+            "url": link.get("href") if link is not None else "",
+        })
+    return out
+
+
+def subscribe(store: Store, ref: str) -> dict[str, Any]:
+    ch = resolve_channel(ref)
+    # Mark everything already published as seen: a subscription only picks up new videos.
+    seen = [v["video_id"] for v in fetch_feed(ch["channel_id"])]
+
+    def fn(data: dict[str, Any]) -> dict[str, Any]:
+        for sub in data["subscriptions"]:
+            if sub["channel_id"] == ch["channel_id"]:
+                return {**sub, "duplicate": True}
+        sub = {**ch, "added": _now(), "seen": seen, "last_checked": _now()}
+        data["subscriptions"].append(sub)
+        return sub
+
+    sub = store.update(fn)
+    return {k: v for k, v in sub.items() if k != "seen"}
+
+
+def unsubscribe(store: Store, ref: str) -> dict[str, Any]:
+    def fn(data: dict[str, Any]) -> dict[str, Any]:
+        for i, sub in enumerate(data["subscriptions"]):
+            if ref in (sub["channel_id"], sub["name"]) or ref.lstrip("@").lower() == sub["name"].lower():
+                data["subscriptions"].pop(i)
+                return {"removed": sub["name"], "channel_id": sub["channel_id"]}
+        raise ValueError(f"no subscription matches {ref}")
+
+    return store.update(fn)
+
+
+def check_subscriptions(store: Store) -> dict[str, Any]:
+    """Queue every video a subscribed channel published since it was last seen."""
+    subs = store.load()["subscriptions"]
+    added, errors = [], []
+    for sub in subs:
+        try:
+            feed = fetch_feed(sub["channel_id"])
+        except Exception as exc:  # one dead feed must not stop the rest
+            errors.append({"channel": sub["name"], "error": str(exc)})
+            continue
+        fresh = [v for v in feed if v["video_id"] not in set(sub["seen"])]
+        for v in reversed(fresh):  # oldest first, so the queue keeps publish order
+            item = add(store, v["url"] or watch_url(v["video_id"]), v["title"], origin=f"subscription:{sub['name']}")
+            if not item.get("duplicate"):
+                added.append({"id": item["id"], "title": v["title"], "channel": sub["name"]})
+
+        def mark(data: dict[str, Any], sub=sub, feed=feed) -> None:
+            for s in data["subscriptions"]:
+                if s["channel_id"] == sub["channel_id"]:
+                    s["seen"] = list(dict.fromkeys(s["seen"] + [v["video_id"] for v in feed]))[-200:]
+                    s["last_checked"] = _now()
+
+        store.update(mark)
+    return {"checked": len(subs), "added": added, "errors": errors}
