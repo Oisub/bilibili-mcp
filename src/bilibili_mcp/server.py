@@ -178,7 +178,7 @@ def _read_log(job_id: str) -> str:
     return ANSI_RE.sub("", path.read_bytes().decode("utf-8", errors="replace"))
 
 
-def _start_job(kind: str, args: list[str], summary: dict[str, Any]) -> dict[str, Any]:
+def _start_job(kind: str, args: list[str], summary: dict[str, Any], cleanup: Path | None = None) -> dict[str, Any]:
     job_id = datetime.now().strftime("%y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     log = open(jobs_dir() / f"{job_id}.log", "wb")  # noqa: SIM115 - closed by the watcher thread
     cmd = [biliup_exe(), "-u", str(cookie_file()), *args]
@@ -194,6 +194,9 @@ def _start_job(kind: str, args: list[str], summary: dict[str, Any]) -> dict[str,
     def watch() -> None:
         code = proc.wait()
         log.close()
+        if cleanup:
+            import shutil
+            shutil.rmtree(cleanup, ignore_errors=True)
         text = _read_log(job_id)
         bvids = BV_RE.findall(text)
         meta.update(status="done" if code == 0 else "failed", exit_code=code,
@@ -252,6 +255,39 @@ def _check_files(files: list[str]) -> list[str]:
     return resolved
 
 
+# Characters Windows forbids in file names, mapped to their full-width forms.
+_FULLWIDTH = str.maketrans('\\/:*?"<>|', "＼／：＊？＂＜＞｜")
+
+
+def _titled_parts(paths: list[str], part_titles: list[str] | None) -> tuple[list[str], Path | None]:
+    """Give each part its title. biliup names a part after its file stem, so link
+    each file under ``<title><ext>`` in a temp folder (hard link, no copy)."""
+    if not part_titles:
+        return paths, None
+    if len(part_titles) != len(paths):
+        raise ValueError("part_titles must have one entry per file")
+    names = [t.strip().translate(_FULLWIDTH).rstrip(". ") for t in part_titles]
+    for i, name in enumerate(names):
+        if not name or len(name) > 80:
+            raise ValueError(f"part title {i + 1} must be 1-80 characters")
+    folder = jobs_dir() / f"parts-{uuid.uuid4().hex[:8]}"
+    out = []
+    for i, (src, name) in enumerate(zip(paths, names)):
+        sub = folder / str(i)  # one subfolder per part, so equal titles cannot collide
+        sub.mkdir(parents=True)
+        dst = sub / (name + Path(src).suffix)
+        try:
+            os.link(src, dst)
+        except OSError:  # different volume: fall back to a symlink, then a copy
+            try:
+                dst.symlink_to(src)
+            except OSError:
+                import shutil
+                shutil.copy2(src, dst)
+        out.append(str(dst))
+    return out, folder
+
+
 # -------------------------------------------------------------------- upload
 
 
@@ -271,6 +307,7 @@ def upload_video(
     no_reprint: bool = False,
     tid_v2: int | None = None,
     line: str = "",
+    part_titles: list[str] | None = None,
 ) -> dict[str, Any]:
     """Upload and submit a new video (稿件). Runs in the background; poll with `upload_status`.
 
@@ -288,25 +325,31 @@ def upload_video(
     dynamic: text of the feed post (空间动态).
     no_reprint: forbid reposting.
     line: upload line override (e.g. bda2, tx, alia); empty lets biliup choose.
+    part_titles: one title per file for the parts (分P标题); empty uses the file names.
     """
     paths = _check_files(files)
     args = ["upload", *_metadata_args(title, tid, tags, desc, cover, copyright, source,
                                        publish_at, private, dynamic, no_reprint, tid_v2)]
     if line:
         args += ["--line", line]
-    meta = _start_job("upload", [*args, *paths], {"title": title, "files": paths})
+    upload_paths, tmp = _titled_parts(paths, part_titles)
+    meta = _start_job("upload", [*args, *upload_paths], {"title": title, "files": paths}, tmp)
     return {"job_id": meta["job_id"], "status": "running",
             "hint": "Call upload_status with this job_id to follow progress."}
 
 
 @mcp.tool()
-def append_parts(bvid: str, files: list[str], line: str = "") -> dict[str, Any]:
-    """Append new parts (分P) to an existing video of this account. Runs in the background."""
+def append_parts(bvid: str, files: list[str], line: str = "", part_titles: list[str] | None = None) -> dict[str, Any]:
+    """Append new parts (分P) to an existing video of this account. Runs in the background.
+
+    part_titles: one title per file (分P标题); empty uses the file names.
+    """
     paths = _check_files(files)
     args = ["append", "--vid", bvid]
     if line:
         args += ["--line", line]
-    meta = _start_job("append", [*args, *paths], {"bvid": bvid, "files": paths})
+    upload_paths, tmp = _titled_parts(paths, part_titles)
+    meta = _start_job("append", [*args, *upload_paths], {"bvid": bvid, "files": paths}, tmp)
     return {"job_id": meta["job_id"], "status": "running"}
 
 

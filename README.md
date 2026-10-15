@@ -41,6 +41,10 @@ A newly added server only shows up after restarting the Claude Code session.
   needs a Rust/MSVC toolchain to build.
 - `publish_at` (定时发布) must be at least 4 hours ahead.
 - `copyright=2` (转载) requires `source`.
+- biliup names each part (分P) after its file stem. `part_titles` works by
+  hard-linking each file as `jobs/parts-*/<n>/<title><ext>` for the upload
+  (symlink, then copy, if the link fails); the folder is removed when the job
+  ends. Characters Windows forbids in file names become full-width (`:` → `：`).
 - "done" in `upload_status` means the submission was accepted; the video still
   goes through review. Check `my_videos` for the outcome.
 - biliup cannot delete videos; delete test uploads in the creator center.
