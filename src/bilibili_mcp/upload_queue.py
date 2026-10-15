@@ -289,7 +289,9 @@ def fetch_playlist(pid: str) -> dict[str, Any]:
         raise ToolError("yt-dlp not found on PATH (set BILIBILI_MCP_YTDLP)")
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     # uv's venv launcher sets PYTHONHOME, which would point yt-dlp's own Python at ours.
+    # PYTHONIOENCODING: its JSON would otherwise come out in the Windows code page.
     env = {k: v for k, v in os.environ.items() if k not in ("PYTHONHOME", "UV_INTERNAL__PYTHONHOME", "VIRTUAL_ENV")}
+    env["PYTHONIOENCODING"] = "utf-8"
     proc = subprocess.run(  # noqa: S603
         [exe, "--no-update", "--flat-playlist", "-J", f"https://www.youtube.com/playlist?list={pid}"],
         capture_output=True, timeout=120, creationflags=flags, stdin=subprocess.DEVNULL, env=env,
@@ -297,7 +299,7 @@ def fetch_playlist(pid: str) -> dict[str, Any]:
     if proc.returncode != 0:
         err = proc.stderr.decode("utf-8", errors="replace").strip()
         raise ToolError(f"could not read playlist {pid}: {err[-500:]}")
-    info = json.loads(proc.stdout)
+    info = json.loads(proc.stdout.decode("utf-8"))
     videos = [{"video_id": e["id"], "title": e.get("title") or ""}
               for e in info.get("entries") or [] if e and e.get("id")]
     return {"title": info.get("title") or "", "videos": videos}
