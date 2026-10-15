@@ -12,6 +12,7 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `upload_video` | Upload + submit a new video (one file per part). Runs in the background |
 | `append_parts` | Append parts (分P) to an existing video. Runs in the background |
 | `upload_status` | Progress / result (`bvid`) of upload jobs, with a log tail |
+| `edit_video` | Change title / description / tags / part titles of a submitted video (goes back to review) |
 | `my_videos` | This account's videos with review state and rejection reasons |
 | `video_info` | Full metadata of one video — reuse its tid / tags / source as a template |
 | `zones` | Zone list (分区) with `tid` values |
@@ -44,6 +45,10 @@ A newly added server only shows up after restarting the Claude Code session.
   needs a Rust/MSVC toolchain to build.
 - `publish_at` (定时发布) must be at least 4 hours ahead.
 - `copyright=2` (转载) requires `source`.
+- Descriptions are cut at **250 characters**. On upload, Bilibili prepends
+  `<source>\n` to a repost's description, and that counts too; `upload_video`
+  rejects a desc that would be cut and drops a duplicated leading source link.
+  The web edit used by `edit_video` does not prepend the source.
 - biliup names each part (分P) after its file stem. `part_titles` works by
   hard-linking each file as `jobs/parts-*/<n>/<title><ext>` for the upload
   (symlink, then copy, if the link fails); the folder is removed when the job

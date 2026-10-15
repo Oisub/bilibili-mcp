@@ -267,6 +267,27 @@ def _metadata_args(
     return args
 
 
+# Bilibili keeps only the first 250 characters of a description. On upload (app
+# submit) it prepends "<source>\n" to a repost's desc, which counts toward the limit.
+DESC_LIMIT = 250
+
+
+def _strip_source(desc: str, source: str) -> str:
+    """Drop leading copies of the source link (Bilibili adds one itself)."""
+    desc = desc.lstrip()
+    while source and desc.startswith(source):
+        desc = desc[len(source):].lstrip()
+    return desc
+
+
+def _check_desc_length(desc: str, source: str) -> None:
+    used = len(desc) + (len(source) + 1 if source else 0)
+    if used > DESC_LIMIT:
+        budget = DESC_LIMIT - (len(source) + 1 if source else 0)
+        raise ValueError(f"desc is {len(desc)} characters; Bilibili keeps only {budget} here "
+                         f"({DESC_LIMIT} minus the auto-added source link). Shorten it.")
+
+
 def _check_files(files: list[str]) -> list[str]:
     if not files:
         raise ValueError("files must list at least one video")
@@ -355,8 +376,9 @@ def upload_video(
     leading copy of the source link in `desc` is dropped.
     """
     paths = _check_files(files)
-    if copyright == 2 and source and desc.lstrip().startswith(source):
-        desc = desc.lstrip()[len(source):].lstrip("\r\n")
+    if copyright == 2 and source:
+        desc = _strip_source(desc, source)
+    _check_desc_length(desc, source if copyright == 2 else "")
     if not part_titles and len(paths) == 1:
         part_titles = [title[:80]]
     args = ["upload", *_metadata_args(title, tid, tags, desc, cover, copyright, source,
@@ -406,12 +428,8 @@ def upload_status(job_id: str = "", log_lines: int = 15) -> dict[str, Any]:
 # --------------------------------------------------------------------- views
 
 
-@mcp.tool(annotations=READ_ONLY)
-def video_info(bvid: str) -> dict[str, Any]:
-    """Metadata and review state of one of this account's videos.
-
-    Useful as a template: reuse its tid, tags, copyright and source for a similar upload.
-    """
+def _show(bvid: str) -> dict[str, Any]:
+    """Full archive JSON of one of this account's videos, via `biliup show`."""
     proc = subprocess.run(  # noqa: S603
         [biliup_exe(), "-u", str(cookie_file()), "show", bvid], cwd=home(),
         capture_output=True, timeout=60, env={**os.environ, "NO_COLOR": "1"},
@@ -421,7 +439,79 @@ def video_info(bvid: str) -> dict[str, Any]:
     if proc.returncode != 0 or "{" not in out:
         err = ANSI_RE.sub("", (proc.stderr or proc.stdout).decode("utf-8", errors="replace"))
         raise RuntimeError(f"biliup show failed: {err.strip()[-500:]}")
-    data = json.loads(out[out.index("{"):])
+    return json.loads(out[out.index("{"):])
+
+
+@mcp.tool()
+def edit_video(
+    bvid: str,
+    title: str | None = None,
+    desc: str | None = None,
+    tags: list[str] | None = None,
+    part_titles: list[str] | None = None,
+) -> dict[str, Any]:
+    """Edit an already submitted video: title, description, tags or part titles.
+
+    Only the given fields change. An edit sends the video back into review.
+    For a repost, write `desc` without the source link: Bilibili adds it itself.
+    part_titles: one per existing part, in order.
+    """
+    data = _show(bvid)
+    arc = data["archive"]
+    parts = data.get("videos") or []
+    if part_titles is not None and len(part_titles) != len(parts):
+        raise ValueError(f"part_titles must have {len(parts)} entries")
+    new_title = title if title is not None else arc.get("title", "")
+    new_desc = desc if desc is not None else arc.get("desc", "")
+    if arc.get("copyright") == 2 and arc.get("source") and desc is not None:
+        new_desc = _strip_source(new_desc, arc["source"])
+    # Unlike the app submit used for uploads, the web edit does not prepend the source.
+    _check_desc_length(new_desc, "")
+    payload = {
+        "aid": arc["aid"],
+        "title": new_title,
+        "tid": arc["tid"],
+        "tag": ",".join(tags) if tags is not None else arc.get("tag", ""),
+        "copyright": arc["copyright"],
+        "source": arc.get("source", ""),
+        "cover": arc.get("cover", ""),
+        "desc": new_desc,
+        "desc_format_id": arc.get("desc_format_id", 0),
+        "dynamic": arc.get("dynamic", ""),
+        "no_reprint": arc.get("no_reprint", 0),
+        "is_only_self": arc.get("is_only_self", 0),
+        "interactive": arc.get("interactive", 0),
+        "mission_id": arc.get("mission_id", 0),
+        "dtime": arc.get("dtime") or 0,
+        "videos": [
+            {"filename": v["filename"], "cid": v["cid"], "desc": v.get("desc", ""),
+             "title": (part_titles[i] if part_titles else v.get("title", ""))}
+            for i, v in enumerate(parts)
+        ],
+    }
+    if arc.get("tid_v2"):
+        payload["tid_v2"] = arc["tid_v2"]
+    csrf = load_cookies().get("bili_jct", "")
+    headers = {"User-Agent": UA, "Referer": "https://member.bilibili.com/"}
+    with httpx.Client(cookies=load_cookies(), headers=headers, timeout=30) as client:
+        resp = client.post("https://member.bilibili.com/x/vu/web/edit",
+                           params={"csrf": csrf, "t": int(time.time() * 1000)}, json=payload)
+        resp.raise_for_status()
+        body = resp.json()
+    if body.get("code") != 0:
+        raise RuntimeError(f"Bilibili edit error {body.get('code')}: {body.get('message')}")
+    return {"bvid": bvid, "edited": [k for k, v in
+            {"title": title, "desc": desc, "tags": tags, "part_titles": part_titles}.items() if v is not None],
+            "hint": "The edit goes back through review; check with video_info."}
+
+
+@mcp.tool(annotations=READ_ONLY)
+def video_info(bvid: str) -> dict[str, Any]:
+    """Metadata and review state of one of this account's videos.
+
+    Useful as a template: reuse its tid, tags, copyright and source for a similar upload.
+    """
+    data = _show(bvid)
     arc = data.get("archive", {})
     return {
         "bvid": arc.get("bvid"),
