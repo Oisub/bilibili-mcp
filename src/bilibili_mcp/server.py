@@ -349,9 +349,16 @@ def upload_video(
     dynamic: text of the feed post (空间动态).
     no_reprint: forbid reposting.
     line: upload line override (e.g. bda2, tx, alia); empty lets biliup choose.
-    part_titles: one title per file for the parts (分P标题); empty uses the file names.
+    part_titles: one title per file for the parts (分P标题). Empty: a single file takes
+        the video title, several files keep their file names.
+    For a repost, Bilibili prepends `source` to the description by itself, so a
+    leading copy of the source link in `desc` is dropped.
     """
     paths = _check_files(files)
+    if copyright == 2 and source and desc.lstrip().startswith(source):
+        desc = desc.lstrip()[len(source):].lstrip("\r\n")
+    if not part_titles and len(paths) == 1:
+        part_titles = [title[:80]]
     args = ["upload", *_metadata_args(title, tid, tags, desc, cover, copyright, source,
                                        publish_at, private, dynamic, no_reprint, tid_v2)]
     if line:
