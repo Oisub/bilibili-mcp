@@ -31,10 +31,12 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 State is `~/.bilibili-mcp/queue.json`. A subscription only queues videos published
 after it was added.
 
-**Daily job** — `python -m bilibili_mcp.daily` (schedule it, e.g. with Windows Task
-Scheduler using `pythonw.exe` so no window opens): polls subscriptions, and if
-something is pending and today's auto quota is unused, runs a headless
-`claude -p` that claims one item, writes the metadata, uploads and finishes it.
+**Scheduled job** — `python -m bilibili_mcp.daily`, run hourly (e.g. Windows Task
+Scheduler with `pythonw.exe` so no window opens). It polls subscriptions and, when
+there is something to post, runs a headless `claude -p` that claims, writes the
+metadata, uploads and finishes each item:
+- videos from subscribed channels are posted as soon as they are found, no limit;
+- manually queued videos are posted one per day, from `BILIBILI_MCP_POST_HOUR` (default 18).
 The prompt is `~/.bilibili-mcp/daily_prompt.md` if present, else the built-in
 default in `daily.py`. Logs go to `~/.bilibili-mcp/daily/<date>.log`;
 `--dry-run` decides without starting Claude.

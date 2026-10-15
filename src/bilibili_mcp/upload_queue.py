@@ -7,9 +7,10 @@ State lives in ``<home>/queue.json``:
 
     {"items": [...], "subscriptions": [...]}
 
-An item moves pending -> processing -> done | failed | skipped. Items an agent
-claims through ``claim_next(auto=True)`` count toward the daily limit; posting
-an item because the user asked for it does not.
+An item moves pending -> processing -> done | failed | skipped. Manually queued
+items are posted through ``claim_next(auto=True)``, at most DAILY_AUTO_LIMIT a
+day. Subscription videos, and anything the user asks to post now, are claimed
+with ``auto=False`` and do not count toward that limit.
 """
 
 from __future__ import annotations
@@ -115,6 +116,8 @@ def claim_next(store: Store, auto: bool, item_id: str = "") -> dict[str, Any]:
         if auto and auto_posts_today(data) >= DAILY_AUTO_LIMIT:
             return {"claimed": None, "reason": f"daily auto limit ({DAILY_AUTO_LIMIT}) reached"}
         pending = [i for i in data["items"] if i["status"] == "pending"]
+        if auto:  # subscription videos are posted on detection, outside the daily quota
+            pending = [i for i in pending if not i["origin"].startswith("subscription:")]
         if item_id:
             pending = [i for i in data["items"] if i["id"] == item_id and i["status"] in ("pending", "failed")]
         if not pending:

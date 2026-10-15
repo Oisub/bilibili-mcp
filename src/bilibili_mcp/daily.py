@@ -1,13 +1,18 @@
-"""Daily job: poll subscriptions, then let a headless Claude Code post one queued video.
+"""Scheduled job: poll subscriptions, then let a headless Claude Code post.
 
-Run by the OS scheduler (Windows Task Scheduler), e.g. ``pythonw -m bilibili_mcp.daily``.
+Run by the OS scheduler every hour (Windows Task Scheduler), e.g.
+``pythonw -m bilibili_mcp.daily``. Each run:
+
+* polls the followed YouTube channels and queues their new videos;
+* posts every queued **subscription** video right away (no daily limit);
+* from POST_HOUR on, posts **one** manually queued video per day.
+
 Polling is plain Python; Claude is only started when there is something to
-post and today's auto quota is unused, because writing the title and
-description is the part that needs judgment.
+post, because writing the title and description is the part that needs judgment.
 
-The prompt comes from ``<home>/daily_prompt.md`` when present (keep channel-
-specific instructions there, outside the repo), else DEFAULT_PROMPT.
-Each run appends to ``<home>/daily/<date>.log``.
+The base prompt comes from ``<home>/daily_prompt.md`` when present (keep
+channel-specific instructions there, outside the repo), else BASE_PROMPT; the
+run's claim instructions are appended. Each run logs to ``<home>/daily/<date>.log``.
 """
 
 from __future__ import annotations
@@ -22,12 +27,17 @@ from datetime import datetime
 from bilibili_mcp import upload_queue
 from bilibili_mcp.server import home, store
 
-DEFAULT_PROMPT = """\
-You are the scheduled daily uploader for this Bilibili channel.
-1. Call mcp__bilibili__queue_claim with auto=true. If nothing is claimed, stop.
-2. Inspect the claimed YouTube video with yt-dlp (`yt-dlp --no-update --no-playlist -J <url>`).
+# Manually queued videos are posted from this local hour on (one per day).
+POST_HOUR = int(os.environ.get("BILIBILI_MCP_POST_HOUR", "18"))
+
+BASE_PROMPT = """\
+You are the scheduled uploader for this Bilibili channel. For each queue item you are told
+to claim below, in order:
+1. Claim it with mcp__bilibili__queue_claim exactly as instructed. If nothing is claimed,
+   go on to the next one.
+2. Inspect the YouTube video with yt-dlp (`yt-dlp --no-update --no-playlist -J <url>`).
    If it is not worth posting (a Short, a trailer without music, an upcoming premiere,
-   off-topic), call queue_finish with status=skipped and a reason, then stop.
+   off-topic), call queue_finish with status=skipped and a reason, and move on.
 3. Download it (1080p H.264 + m4a merged to mp4, plus the thumbnail as jpg) into a new
    folder under the working directory's `work/` folder. If YouTube returns 403, upgrade
    yt-dlp (`python -m pip install -U "yt-dlp[default]"`) and retry.
@@ -36,8 +46,8 @@ You are the scheduled daily uploader for this Bilibili channel.
    mcp__bilibili__upload_video as a repost with the YouTube URL as source.
 5. Wait for mcp__bilibili__upload_status to report done, verify with video_info, then call
    queue_finish with status=done and the bvid. On any failure call queue_finish with
-   status=failed and the error. Delete the downloaded files at the end.
-Finish with a two-line summary: BV id and title, or why nothing was posted.
+   status=failed and the error. Delete the downloaded files.
+Finish with one line per item: BV id and title, or why it was not posted.
 """
 
 ALLOWED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "mcp__bilibili"]
@@ -59,6 +69,17 @@ def log(msg: str) -> None:
         fh.write(line)
 
 
+def plan(data: dict, now: datetime) -> list[str]:
+    """Claim instructions for this run, one line per item."""
+    pending = [i for i in data["items"] if i["status"] == "pending"]
+    lines = [f"- item {i['id']} ({i['url']}): queue_claim(auto=false, item_id=\"{i['id']}\")"
+             for i in pending if i["origin"].startswith("subscription:")]
+    manual = [i for i in pending if not i["origin"].startswith("subscription:")]
+    if manual and now.hour >= POST_HOUR and upload_queue.auto_posts_today(data) < upload_queue.DAILY_AUTO_LIMIT:
+        lines.append("- the oldest manually queued item: queue_claim(auto=true)")
+    return lines
+
+
 def run(dry_run: bool = False) -> int:
     lock = home() / "daily.lock"
     try:
@@ -66,33 +87,29 @@ def run(dry_run: bool = False) -> int:
     except FileExistsError:
         age = datetime.now().timestamp() - lock.stat().st_mtime
         if age < 3 * 3600:
-            log("another run holds daily.lock; exiting")
-            return 0
+            return 0  # a previous run (or its Claude) is still working
         lock.unlink(missing_ok=True)  # left over from a crashed run
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     os.close(fd)
     try:
         result = upload_queue.check_subscriptions(store())
-        log(f"subscriptions: {json.dumps(result, ensure_ascii=False)}")
-        data = store().load()
-        pending = [i for i in data["items"] if i["status"] == "pending"]
-        if upload_queue.auto_posts_today(data) >= upload_queue.DAILY_AUTO_LIMIT:
-            log("daily auto limit already used; not posting")
-            return 0
-        if not pending:
-            log("queue empty; not posting")
+        if result["added"] or result["errors"]:
+            log(f"subscriptions: {json.dumps(result, ensure_ascii=False)}")
+        claims = plan(store().load(), datetime.now())
+        if not claims:
             return 0
         prompt_file = home() / "daily_prompt.md"
-        prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else DEFAULT_PROMPT
-        cmd = [claude_exe(), "-p", prompt, "--allowedTools", *ALLOWED_TOOLS]
-        log(f"starting claude for {len(pending)} pending item(s)")
+        prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else BASE_PROMPT
+        prompt += "\nItems to claim in this run:\n" + "\n".join(claims) + "\n"
+        log("posting:\n" + "\n".join(claims))
         if dry_run:
             log("dry run: not starting claude")
             return 0
         (home() / "work").mkdir(exist_ok=True)
         flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
         proc = subprocess.run(  # noqa: S603
-            cmd, cwd=home(), capture_output=True, timeout=3 * 3600, creationflags=flags,
+            [claude_exe(), "-p", prompt, "--allowedTools", *ALLOWED_TOOLS],
+            cwd=home(), capture_output=True, timeout=3 * 3600, creationflags=flags,
             stdin=subprocess.DEVNULL,
         )
         out = proc.stdout.decode("utf-8", errors="replace").strip()
