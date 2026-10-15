@@ -35,6 +35,9 @@ from typing import Any
 
 import httpx
 from mcp.server.mcpserver import MCPServer
+# Only ToolError text reaches the client; any other exception is reported as a bare
+# "Error executing tool <name>", so every anticipated failure raises ToolError.
+from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
 from bilibili_mcp import upload_queue
@@ -79,7 +82,7 @@ def jobs_dir() -> Path:
 def biliup_exe() -> str:
     exe = Path(sys.executable).with_name("biliup.exe" if os.name == "nt" else "biliup")
     if not exe.exists():
-        raise RuntimeError(f"biliup CLI not found next to the Python interpreter ({exe})")
+        raise ToolError(f"biliup CLI not found next to the Python interpreter ({exe})")
     return str(exe)
 
 
@@ -89,12 +92,12 @@ def biliup_exe() -> str:
 def load_cookies() -> dict[str, str]:
     path = cookie_file()
     if not path.exists():
-        raise RuntimeError("Not logged in. Call the `login` tool first.")
+        raise ToolError("Not logged in. Call the `login` tool first.")
     data = json.loads(path.read_text(encoding="utf-8"))
     cookies = data.get("cookie_info", {}).get("cookies", [])
     jar = {c["name"]: c["value"] for c in cookies if "name" in c and "value" in c}
     if "SESSDATA" not in jar:
-        raise RuntimeError("Cookie file has no SESSDATA. Call `login` again.")
+        raise ToolError("Cookie file has no SESSDATA. Call `login` again.")
     return jar
 
 
@@ -106,7 +109,7 @@ def web_get(url: str, params: dict[str, Any] | None = None) -> Any:
         resp.raise_for_status()
         body = resp.json()
     if body.get("code") != 0:
-        raise RuntimeError(f"Bilibili API error {body.get('code')}: {body.get('message')}")
+        raise ToolError(f"Bilibili API error {body.get('code')}: {body.get('message')}")
     return body.get("data")
 
 
@@ -137,7 +140,7 @@ def wbi_get(url: str, params: dict[str, Any]) -> Any:
 def whoami() -> dict[str, Any]:
     data = web_get("https://api.bilibili.com/x/web-interface/nav")
     if not data.get("isLogin"):
-        raise RuntimeError("Cookies expired. Call `login` again.")
+        raise ToolError("Cookies expired. Call `login` again.")
     return {"mid": data.get("mid"), "name": data.get("uname"), "level": data.get("level_info", {}).get("current_level")}
 
 
@@ -240,15 +243,15 @@ def _metadata_args(
     publish_at: str, private: bool, dynamic: str, no_reprint: bool, tid_v2: int | None,
 ) -> list[str]:
     if not title.strip():
-        raise ValueError("title is required")
+        raise ToolError("title is required")
     if len(title) > 80:
-        raise ValueError("title must be 80 characters or fewer")
+        raise ToolError("title must be 80 characters or fewer")
     if not tags:
-        raise ValueError("at least one tag is required")
+        raise ToolError("at least one tag is required")
     if copyright == 2 and not source:
-        raise ValueError("source is required for a repost (copyright=2)")
+        raise ToolError("source is required for a repost (copyright=2)")
     if cover and not Path(cover).is_file():
-        raise ValueError(f"cover image not found: {cover}")
+        raise ToolError(f"cover image not found: {cover}")
     args = ["--title", title, "--tid", str(tid), "--tag", ",".join(tags), "--desc", desc,
             "--copyright", str(copyright), "--no-reprint", "1" if no_reprint else "0"]
     if tid_v2 is not None:
@@ -264,7 +267,7 @@ def _metadata_args(
     if publish_at:
         ts = int(datetime.fromisoformat(publish_at).timestamp())
         if ts - time.time() < MIN_SCHEDULE_AHEAD:
-            raise ValueError("publish_at must be at least 4 hours from now")
+            raise ToolError("publish_at must be at least 4 hours from now")
         args += ["--dtime", str(ts)]
     return args
 
@@ -286,18 +289,18 @@ def _check_desc_length(desc: str, source: str) -> None:
     used = len(desc) + (len(source) + 1 if source else 0)
     if used > DESC_LIMIT:
         budget = DESC_LIMIT - (len(source) + 1 if source else 0)
-        raise ValueError(f"desc is {len(desc)} characters; Bilibili keeps only {budget} here "
+        raise ToolError(f"desc is {len(desc)} characters; Bilibili keeps only {budget} here "
                          f"({DESC_LIMIT} minus the auto-added source link). Shorten it.")
 
 
 def _check_files(files: list[str]) -> list[str]:
     if not files:
-        raise ValueError("files must list at least one video")
+        raise ToolError("files must list at least one video")
     resolved = []
     for f in files:
         p = Path(f)
         if not p.is_file():
-            raise ValueError(f"video not found: {f}")
+            raise ToolError(f"video not found: {f}")
         resolved.append(str(p.resolve()))
     return resolved
 
@@ -312,11 +315,11 @@ def _titled_parts(paths: list[str], part_titles: list[str] | None) -> tuple[list
     if not part_titles:
         return paths, None
     if len(part_titles) != len(paths):
-        raise ValueError("part_titles must have one entry per file")
+        raise ToolError("part_titles must have one entry per file")
     names = [t.strip().translate(_FULLWIDTH).rstrip(". ") for t in part_titles]
     for i, name in enumerate(names):
         if not name or len(name) > 80:
-            raise ValueError(f"part title {i + 1} must be 1-80 characters")
+            raise ToolError(f"part title {i + 1} must be 1-80 characters")
     folder = jobs_dir() / f"parts-{uuid.uuid4().hex[:8]}"
     out = []
     for i, (src, name) in enumerate(zip(paths, names)):
@@ -420,7 +423,7 @@ def upload_status(job_id: str = "", log_lines: int = 15) -> dict[str, Any]:
         return {"jobs": [json.loads(p.read_text(encoding="utf-8")) for p in metas]}
     path = _job_meta_path(job_id)
     if not path.exists():
-        raise ValueError(f"unknown job_id: {job_id}")
+        raise ToolError(f"unknown job_id: {job_id}")
     meta = json.loads(path.read_text(encoding="utf-8"))
     lines = [ln for ln in _read_log(job_id).splitlines() if ln.strip()]
     meta["log_tail"] = lines[-log_lines:]
@@ -440,7 +443,7 @@ def _show(bvid: str) -> dict[str, Any]:
     out = proc.stdout.decode("utf-8", errors="replace")
     if proc.returncode != 0 or "{" not in out:
         err = ANSI_RE.sub("", (proc.stderr or proc.stdout).decode("utf-8", errors="replace"))
-        raise RuntimeError(f"biliup show failed: {err.strip()[-500:]}")
+        raise ToolError(f"biliup show failed: {err.strip()[-500:]}")
     return json.loads(out[out.index("{"):])
 
 
@@ -462,7 +465,7 @@ def edit_video(
     arc = data["archive"]
     parts = data.get("videos") or []
     if part_titles is not None and len(part_titles) != len(parts):
-        raise ValueError(f"part_titles must have {len(parts)} entries")
+        raise ToolError(f"part_titles must have {len(parts)} entries")
     new_title = title if title is not None else arc.get("title", "")
     new_desc = desc if desc is not None else arc.get("desc", "")
     if arc.get("copyright") == 2 and arc.get("source") and desc is not None:
@@ -501,7 +504,7 @@ def edit_video(
         resp.raise_for_status()
         body = resp.json()
     if body.get("code") != 0:
-        raise RuntimeError(f"Bilibili edit error {body.get('code')}: {body.get('message')}")
+        raise ToolError(f"Bilibili edit error {body.get('code')}: {body.get('message')}")
     return {"bvid": bvid, "edited": [k for k, v in
             {"title": title, "desc": desc, "tags": tags, "part_titles": part_titles}.items() if v is not None],
             "hint": "The edit goes back through review; check with video_info."}
@@ -610,7 +613,7 @@ def my_videos(status: str = "all", page: int = 1, page_size: int = 10) -> dict[s
     status_map = {"all": "is_pubing,pubed,not_pubed", "pubing": "is_pubing",
                   "pubed": "pubed", "not_pubed": "not_pubed"}
     if status not in status_map:
-        raise ValueError(f"status must be one of {sorted(status_map)}")
+        raise ToolError(f"status must be one of {sorted(status_map)}")
     data = web_get("https://member.bilibili.com/x/web/archives",
                    {"status": status_map[status], "pn": page, "ps": page_size})
     items = []

@@ -23,6 +23,7 @@ from pathlib import Path
 from typing import Any, Callable
 
 import httpx
+from mcp.server.mcpserver.exceptions import ToolError
 
 YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/live/)([0-9A-Za-z_-]{11})")
 CHANNEL_ID_RE = re.compile(r"\bUC[0-9A-Za-z_-]{22}\b")
@@ -67,7 +68,7 @@ def video_id(url: str) -> str:
         return m.group(1)
     if re.fullmatch(r"[0-9A-Za-z_-]{11}", url.strip()):
         return url.strip()
-    raise ValueError(f"not a YouTube video URL: {url}")
+    raise ToolError(f"not a YouTube video URL: {url}")
 
 
 def watch_url(vid: str) -> str:
@@ -127,7 +128,7 @@ def claim_next(store: Store, auto: bool, item_id: str = "") -> dict[str, Any]:
 
 def finish(store: Store, item_id: str, status: str, bvid: str = "", note: str = "") -> dict[str, Any]:
     if status not in ("done", "failed", "skipped", "pending"):
-        raise ValueError("status must be done, failed, skipped or pending")
+        raise ToolError("status must be done, failed, skipped or pending")
 
     def fn(data: dict[str, Any]) -> dict[str, Any]:
         for item in data["items"]:
@@ -138,7 +139,7 @@ def finish(store: Store, item_id: str, status: str, bvid: str = "", note: str = 
                 if note:
                     item["note"] = note
                 return item
-        raise ValueError(f"unknown queue item: {item_id}")
+        raise ToolError(f"unknown queue item: {item_id}")
 
     return store.update(fn)
 
@@ -148,7 +149,7 @@ def remove(store: Store, item_id: str) -> dict[str, Any]:
         for i, item in enumerate(data["items"]):
             if item["id"] == item_id:
                 return data["items"].pop(i)
-        raise ValueError(f"unknown queue item: {item_id}")
+        raise ToolError(f"unknown queue item: {item_id}")
 
     return store.update(fn)
 
@@ -175,7 +176,7 @@ def resolve_channel(ref: str) -> dict[str, str]:
         re.search(r'<meta itemprop="identifier" content="(UC[0-9A-Za-z_-]{22})"', html) or \
         re.search(r'"channelId":"(UC[0-9A-Za-z_-]{22})"', html)
     if not m:
-        raise RuntimeError(f"could not find a channel id on {url}")
+        raise ToolError(f"could not find a channel id on {url}")
     name = re.search(r'<meta property="og:title" content="([^"]*)"', html)
     return {"channel_id": m.group(1), "name": name.group(1) if name else ref}
 
@@ -220,7 +221,7 @@ def unsubscribe(store: Store, ref: str) -> dict[str, Any]:
             if ref in (sub["channel_id"], sub["name"]) or ref.lstrip("@").lower() == sub["name"].lower():
                 data["subscriptions"].pop(i)
                 return {"removed": sub["name"], "channel_id": sub["channel_id"]}
-        raise ValueError(f"no subscription matches {ref}")
+        raise ToolError(f"no subscription matches {ref}")
 
     return store.update(fn)
 
