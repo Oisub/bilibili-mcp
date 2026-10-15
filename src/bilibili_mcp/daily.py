@@ -3,6 +3,7 @@
 Run by the OS scheduler every hour (Windows Task Scheduler), e.g.
 ``pythonw -m bilibili_mcp.daily``. Each run:
 
+* syncs the queue playlist (the user's YouTube playlist of videos to post);
 * polls the followed YouTube channels and queues their new videos;
 * posts every queued **subscription** video right away (no daily limit);
 * from POST_HOUR on, posts manually queued videos up to the weekday's limit
@@ -94,6 +95,12 @@ def run(dry_run: bool = False) -> int:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     os.close(fd)
     try:
+        try:
+            synced = upload_queue.sync_playlist(store())
+            if synced.get("added") or synced.get("removed"):
+                log(f"playlist: {json.dumps(synced, ensure_ascii=False)}")
+        except Exception as exc:  # a bad playlist read must not block subscriptions
+            log(f"playlist error: {exc!r}")
         result = upload_queue.check_subscriptions(store())
         if result["added"] or result["errors"]:
             log(f"subscriptions: {json.dumps(result, ensure_ascii=False)}")

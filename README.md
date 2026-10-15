@@ -27,12 +27,18 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `queue_finish` | Record the outcome: done (with bvid) / failed / skipped / pending |
 | `subscribe` / `unsubscribe` / `subscriptions` | Follow YouTube channels (URL, @handle or channel id) |
 | `check_subscriptions` | Poll followed channels (RSS) and queue new videos |
+| `queue_playlist` | Link / sync a YouTube playlist that acts as the manual queue |
+
+The manual queue can be managed from YouTube: link a public or unlisted playlist with
+`queue_playlist(<url>)`. Videos added to it are queued, its order is the posting
+order, and pending videos removed from it leave the queue. Posted videos may stay in
+the playlist (the queue remembers them, so nothing is posted twice).
 
 State is `~/.bilibili-mcp/queue.json`. A subscription only queues videos published
 after it was added.
 
 **Scheduled job** — `python -m bilibili_mcp.daily`, run hourly (e.g. Windows Task
-Scheduler with `pythonw.exe` so no window opens). It polls subscriptions and, when
+Scheduler with `pythonw.exe` so no window opens). It syncs the queue playlist, polls subscriptions and, when
 there is something to post, runs a headless `claude -p` that claims, writes the
 metadata, uploads and finishes each item:
 - videos from subscribed channels are posted as soon as they are found, no limit;

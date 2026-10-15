@@ -5,7 +5,12 @@ how far each got. Writing titles and descriptions stays with the agent.
 
 State lives in ``<home>/queue.json``:
 
-    {"items": [...], "subscriptions": [...]}
+    {"items": [...], "subscriptions": [...], "playlist": {...}}
+
+The user manages manual items in a YouTube playlist on their own account:
+``sync_playlist`` queues videos added there (origin "playlist"), follows its
+order, and drops pending items that were removed from it. The playlist must be
+public or unlisted, since it is read without login.
 
 An item moves pending -> processing -> done | failed | skipped. Manually queued
 items are posted through ``claim_next(auto=True)``, at most daily_auto_limit()
@@ -16,7 +21,10 @@ with ``auto=False`` and do not count toward that limit.
 from __future__ import annotations
 
 import json
+import os
 import re
+import shutil
+import subprocess
 import uuid
 import xml.etree.ElementTree as ET
 from datetime import datetime, timedelta
@@ -28,6 +36,7 @@ from mcp.server.mcpserver.exceptions import ToolError
 
 YT_ID_RE = re.compile(r"(?:v=|youtu\.be/|/shorts/|/live/)([0-9A-Za-z_-]{11})")
 CHANNEL_ID_RE = re.compile(r"\bUC[0-9A-Za-z_-]{22}\b")
+PLAYLIST_ID_RE = re.compile(r"(?:list=)?\b((?:PL|OL|UU)[0-9A-Za-z_-]{10,})")
 FEED = "https://www.youtube.com/feeds/videos.xml?channel_id={}"
 NS = {"a": "http://www.w3.org/2005/Atom", "yt": "http://www.youtube.com/xml/schemas/2015",
       "media": "http://search.yahoo.com/mrss/"}
@@ -123,6 +132,7 @@ def claim_next(store: Store, auto: bool, item_id: str = "") -> dict[str, Any]:
         if auto and auto_posts_today(data) >= limit:
             return {"claimed": None, "reason": f"today's auto limit ({limit}) reached"}
         pending = [i for i in data["items"] if i["status"] == "pending"]
+        pending.sort(key=lambda i: i.get("pos", float("inf")))  # playlist order first, stable otherwise
         if auto:  # subscription videos are posted on detection, outside the daily quota
             pending = [i for i in pending if not i["origin"].startswith("subscription:")]
         if item_id:
@@ -260,3 +270,76 @@ def check_subscriptions(store: Store) -> dict[str, Any]:
 
         store.update(mark)
     return {"checked": len(subs), "added": added, "errors": errors}
+
+
+# ------------------------------------------------------------------ playlist
+
+
+def playlist_id(ref: str) -> str:
+    m = PLAYLIST_ID_RE.search(ref.strip())
+    if not m:
+        raise ToolError(f"not a YouTube playlist URL or id: {ref}")
+    return m.group(1)
+
+
+def fetch_playlist(pid: str) -> dict[str, Any]:
+    """Title and video ids of a playlist, in playlist order (yt-dlp, no login)."""
+    exe = os.environ.get("BILIBILI_MCP_YTDLP") or shutil.which("yt-dlp")
+    if not exe:
+        raise ToolError("yt-dlp not found on PATH (set BILIBILI_MCP_YTDLP)")
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    # uv's venv launcher sets PYTHONHOME, which would point yt-dlp's own Python at ours.
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONHOME", "UV_INTERNAL__PYTHONHOME", "VIRTUAL_ENV")}
+    proc = subprocess.run(  # noqa: S603
+        [exe, "--no-update", "--flat-playlist", "-J", f"https://www.youtube.com/playlist?list={pid}"],
+        capture_output=True, timeout=120, creationflags=flags, stdin=subprocess.DEVNULL, env=env,
+    )
+    if proc.returncode != 0:
+        err = proc.stderr.decode("utf-8", errors="replace").strip()
+        raise ToolError(f"could not read playlist {pid}: {err[-500:]}")
+    info = json.loads(proc.stdout)
+    videos = [{"video_id": e["id"], "title": e.get("title") or ""}
+              for e in info.get("entries") or [] if e and e.get("id")]
+    return {"title": info.get("title") or "", "videos": videos}
+
+
+def set_playlist(store: Store, ref: str) -> dict[str, Any]:
+    pid = playlist_id(ref)
+    info = fetch_playlist(pid)  # fail now if it is private or wrong
+    store.update(lambda data: data.update(playlist={"id": pid, "title": info["title"]}))
+    return {"id": pid, "title": info["title"], "videos": len(info["videos"]), **sync_playlist(store)}
+
+
+def sync_playlist(store: Store) -> dict[str, Any]:
+    """Mirror the playlist into the queue: add new videos, follow its order, and drop
+    pending playlist items that are no longer in it. Posted videos may stay in the playlist."""
+    pl = store.load().get("playlist")
+    if not pl:
+        return {"playlist": None}
+    videos = fetch_playlist(pl["id"])["videos"]
+    order = {v["video_id"]: n for n, v in enumerate(videos)}
+
+    def fn(data: dict[str, Any]) -> dict[str, Any]:
+        added, removed = [], []
+        known = {i["video_id"]: i for i in data["items"]}
+        for v in videos:
+            item = known.get(v["video_id"])
+            if item is None:
+                item = {"id": uuid.uuid4().hex[:6], "video_id": v["video_id"], "url": watch_url(v["video_id"]),
+                        "title": v["title"], "origin": "playlist", "note": "", "status": "pending", "added": _now()}
+                data["items"].append(item)
+                added.append({"id": item["id"], "title": v["title"]})
+            elif item["origin"] == "manual" and item["status"] == "pending":
+                item["origin"] = "playlist"  # adopted: the playlist now decides its fate
+        for item in list(data["items"]):
+            if item["origin"] != "playlist" or item["status"] not in ("pending", "failed"):
+                continue
+            if item["video_id"] in order:
+                item["pos"] = order[item["video_id"]]
+            else:
+                data["items"].remove(item)
+                removed.append({"id": item["id"], "video_id": item["video_id"]})
+        data["playlist"]["last_synced"] = _now()
+        return {"added": added, "removed": removed}
+
+    return store.update(fn)

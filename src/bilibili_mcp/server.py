@@ -644,7 +644,8 @@ def store() -> upload_queue.Store:
 @mcp.tool()
 def queue_add(url: str, note: str = "") -> dict[str, Any]:
     """Add a YouTube video to the upload queue (the daily job posts queued videos only
-    Fri (2), Sat (2) and Sun (1), from the evening on)."""
+    Fri (2), Sat (2) and Sun (1), from the evening on). The user normally queues videos by
+    adding them to the queue playlist instead (see `queue_playlist`)."""
     return upload_queue.add(store(), url, origin="manual", note=note)
 
 
@@ -658,7 +659,8 @@ def queue_list(status: str = "open") -> dict[str, Any]:
     open_states = {"pending", "processing", "failed"}
     items = [i for i in data["items"]
              if status == "all" or (status == "open" and i["status"] in open_states) or i["status"] == status]
-    return {"auto_posts_today": upload_queue.auto_posts_today(data),
+    return {"playlist": data.get("playlist"),
+            "auto_posts_today": upload_queue.auto_posts_today(data),
             "daily_auto_limit": upload_queue.daily_auto_limit(),
             "weekly_auto_limits": dict(zip(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
                                            upload_queue.WEEKLY_AUTO_LIMITS)),
@@ -691,6 +693,19 @@ def queue_finish(item_id: str, status: str, bvid: str = "", note: str = "") -> d
 def queue_remove(item_id: str) -> dict[str, Any]:
     """Delete an item from the queue."""
     return upload_queue.remove(store(), item_id)
+
+
+@mcp.tool()
+def queue_playlist(playlist: str = "") -> dict[str, Any]:
+    """Sync the queue with the user's YouTube queue playlist (public or unlisted).
+
+    playlist: a playlist URL or id to (re)link it; empty just syncs the linked one.
+    New videos in the playlist are queued, its order is the posting order, and pending
+    items removed from it leave the queue. The daily job syncs every hour.
+    """
+    if playlist:
+        return upload_queue.set_playlist(store(), playlist)
+    return upload_queue.sync_playlist(store())
 
 
 @mcp.tool()
