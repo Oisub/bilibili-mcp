@@ -18,6 +18,8 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `zones` | Zone list (分区) with `tid` values |
 | `trending` | What's hot site-wide right now (排行榜 + 综合热门 + 每周必看, ~230 titles) for studying title patterns |
 | `memes` | Meme templates (梗/定型文) spreading right now: candidates from 梗百科-style explainer videos, ranked by how many uploads of the last 48 h reuse them, with top examples (cached 3 h) |
+| `feedback_report` | How posted videos did: views at 24h / 72h / 7d / 30d vs the channel median, grouped by title style and meme use |
+| `feedback_tag` | After an upload, record the title's style and borrowed meme so the report can relate titles to results |
 
 ### Queue and subscriptions
 
@@ -53,6 +55,11 @@ metadata, uploads and finishes each item:
 - videos from subscribed channels are posted as soon as they are found, no limit;
 - manually queued videos are posted from `BILIBILI_MCP_POST_HOUR` (default 18), up to a per-weekday limit
   (`WEEKLY_AUTO_LIMITS`: none Monday–Thursday, two on Friday and Saturday, one on Sunday).
+Every run also snapshots the counters of posted videos at 24h / 72h / 7d / 30d
+(`~/.bilibili-mcp/feedback.json`). About once a week, on a run with nothing to post and
+at least 3 newly matured videos, a headless review reads `feedback_report` and may edit
+the "数据反馈" section of the style guide within the bounds written there, logging to
+`~/.bilibili-mcp/feedback/changes.md` (prompt override: `review_prompt.md`).
 The prompt is `~/.bilibili-mcp/daily_prompt.md` if present, else the built-in
 default in `daily.py`. Logs go to `~/.bilibili-mcp/daily/<date>.log`;
 `--dry-run` decides without starting Claude.

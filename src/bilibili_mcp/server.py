@@ -40,7 +40,7 @@ from mcp.server.mcpserver import MCPServer
 from mcp.server.mcpserver.exceptions import ToolError
 from mcp.types import ToolAnnotations
 
-from bilibili_mcp import upload_queue
+from bilibili_mcp import feedback, upload_queue
 
 mcp = MCPServer("bilibili")
 logging.getLogger("httpx").setLevel(logging.WARNING)
@@ -738,6 +738,43 @@ def my_videos(status: str = "all", page: int = 1, page_size: int = 10) -> dict[s
             "url": f"https://www.bilibili.com/video/{arc.get('bvid')}",
         })
     return {"total": data.get("page", {}).get("count"), "videos": items}
+
+
+# --------------------------------------------------------- feedback
+
+
+def feedback_store() -> feedback.Store:
+    return feedback.Store(home() / "feedback.json")
+
+
+@mcp.tool(annotations=READ_ONLY)
+def feedback_report(days: int = 90) -> dict[str, Any]:
+    """How posted videos performed, for learning which titles work.
+
+    Refreshes the counters first (the daily job also does this hourly). Each video posted in the
+    last `days` days shows views at 24h / 72h / 7d / 30d, `vs_median` (views at its latest
+    milestone / channel median at that milestone), `engagement` ((like+coin+fav)/view), and its
+    title `style` / `meme` as recorded by `feedback_tag`; `groups` gives medians per style and
+    meme vs no meme. Small groups (n < 3) are anecdotes, not evidence.
+    """
+    feedback.collect(feedback_store(), web_get)
+    return feedback.report(feedback_store(), days)
+
+
+@mcp.tool()
+def feedback_tag(bvid: str, style: str, meme: str = "", note: str = "") -> dict[str, Any]:
+    """Record how a video was titled, right after uploading it, so `feedback_report` can relate
+    title choices to results.
+
+    style: the title's main structure, one of 冒号体 (`人名：看点`), 钩子 (Chinese narrative hook),
+        白描 (plain quiet description), 惯用格式 (`【现代爵士/地区】曲名 - 艺人`), 定型文 (structured
+        template such as the 延毕 pattern), 烂梗 (internet catchphrase meme), 自拍现场.
+    meme: the template/meme borrowed, in its original form (empty if none).
+    note: anything else worth correlating later (e.g. "日本艺人", "J-Pop", "首次搬运该乐手").
+    """
+    if style not in feedback.STYLES:
+        raise ToolError(f"style must be one of {list(feedback.STYLES)}")
+    return feedback.tag(feedback_store(), bvid, style, meme, note)
 
 
 # --------------------------------------------------------- queue / subscriptions

@@ -5,16 +5,22 @@ Run by the OS scheduler every hour (Windows Task Scheduler), e.g.
 
 * syncs the queue playlist (the user's YouTube playlist of videos to post);
 * polls the followed YouTube channels and queues their new videos;
+* records performance snapshots of posted videos (feedback.collect);
 * posts every queued **subscription** video right away (no daily limit);
 * from POST_HOUR on, posts manually queued videos up to the weekday's limit
-  (upload_queue.WEEKLY_AUTO_LIMITS: none Mon-Thu, two Fri/Sat, one Sun).
+  (upload_queue.WEEKLY_AUTO_LIMITS: none Mon-Thu, two Fri/Sat, one Sun);
+* on a run with nothing to post, about once a week when enough videos have
+  matured, runs a feedback review: Claude reads the stats and may adjust the
+  style guide's feedback section within the bounds written there.
 
 Polling is plain Python; Claude is only started when there is something to
-post, because writing the title and description is the part that needs judgment.
+post or review, because those are the parts that need judgment.
 
 The base prompt comes from ``<home>/daily_prompt.md`` when present (keep
 channel-specific instructions there, outside the repo), else BASE_PROMPT; the
-run's claim instructions are appended. Each run logs to ``<home>/daily/<date>.log``.
+run's claim instructions are appended. The review prompt likewise comes from
+``<home>/review_prompt.md``, else REVIEW_PROMPT. Each run logs to
+``<home>/daily/<date>.log``.
 """
 
 from __future__ import annotations
@@ -26,8 +32,8 @@ import subprocess
 import sys
 from datetime import datetime
 
-from bilibili_mcp import upload_queue
-from bilibili_mcp.server import home, store
+from bilibili_mcp import feedback, upload_queue
+from bilibili_mcp.server import feedback_store, home, store, web_get
 
 # Manually queued videos are posted from this local hour on (on allowed weekdays).
 POST_HOUR = int(os.environ.get("BILIBILI_MCP_POST_HOUR", "18"))
@@ -46,10 +52,24 @@ to claim below, in order:
 4. Write the metadata following channel_style.md in the working directory, if present
    (including its title workflow with mcp__bilibili__memes and mcp__bilibili__trending), and upload it with
    mcp__bilibili__upload_video as a repost with the YouTube URL as source.
-5. Wait for mcp__bilibili__upload_status to report done, verify with video_info, then call
+5. Wait for mcp__bilibili__upload_status to report done, verify with video_info, record the
+   title's style and borrowed meme with mcp__bilibili__feedback_tag, then call
    queue_finish with status=done and the bvid. On any failure call queue_finish with
    status=failed and the error. Delete the downloaded files.
 Finish with one line per item: BV id and title, or why it was not posted.
+"""
+
+REVIEW_PROMPT = """\
+You are the weekly feedback reviewer for this Bilibili channel.
+1. Call mcp__bilibili__feedback_report and read channel_style.md in the working directory.
+2. Look for patterns that hold across at least 3 videos (title style, meme vs none, artist
+   origin, title length...). Ignore single outliers; who the artist is often matters more
+   than the title, so compare like with like.
+3. Edit ONLY the section of channel_style.md titled "数据反馈" and stay within the bounds
+   written there. If the evidence is thin, change nothing; that is a fine outcome.
+4. Append a dated entry to feedback/changes.md in the working directory: what the data
+   showed, what you changed (quote old -> new) or why you changed nothing.
+Finish with a 2-3 line summary.
 """
 
 ALLOWED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "mcp__bilibili"]
@@ -83,6 +103,31 @@ def plan(data: dict, now: datetime) -> list[str]:
     return lines
 
 
+def run_claude(prompt: str) -> int:
+    flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    proc = subprocess.run(  # noqa: S603
+        [claude_exe(), "-p", prompt, "--allowedTools", *ALLOWED_TOOLS],
+        cwd=home(), capture_output=True, timeout=3 * 3600, creationflags=flags,
+        stdin=subprocess.DEVNULL,
+    )
+    out = proc.stdout.decode("utf-8", errors="replace").strip()
+    err = proc.stderr.decode("utf-8", errors="replace").strip()
+    log(f"claude exited {proc.returncode}\n{out}" + (f"\nstderr: {err[-2000:]}" if err else ""))
+    return proc.returncode
+
+
+def review() -> int:
+    """Weekly feedback review: Claude reads the stats and may tune the style guide."""
+    prompt_file = home() / "review_prompt.md"
+    prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else REVIEW_PROMPT
+    (home() / "feedback").mkdir(exist_ok=True)
+    log("feedback review")
+    code = run_claude(prompt)
+    if code == 0:
+        feedback.mark_reviewed(feedback_store())
+    return code
+
+
 def run(dry_run: bool = False) -> int:
     lock = home() / "daily.lock"
     try:
@@ -104,8 +149,19 @@ def run(dry_run: bool = False) -> int:
         result = upload_queue.check_subscriptions(store())
         if result["added"] or result["errors"]:
             log(f"subscriptions: {json.dumps(result, ensure_ascii=False)}")
+        try:
+            snap = feedback.collect(feedback_store(), web_get)
+            if snap["new_videos"] or snap["snapshots"]:
+                log(f"feedback: {json.dumps(snap)}")
+        except Exception as exc:  # stats are a side task; never block posting
+            log(f"feedback error: {exc!r}")
         claims = plan(store().load(), datetime.now())
         if not claims:
+            if feedback.review_due(feedback_store()):
+                if dry_run:
+                    log("dry run: feedback review due")
+                    return 0
+                return review()
             return 0
         prompt_file = home() / "daily_prompt.md"
         prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else BASE_PROMPT
@@ -115,16 +171,7 @@ def run(dry_run: bool = False) -> int:
             log("dry run: not starting claude")
             return 0
         (home() / "work").mkdir(exist_ok=True)
-        flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
-        proc = subprocess.run(  # noqa: S603
-            [claude_exe(), "-p", prompt, "--allowedTools", *ALLOWED_TOOLS],
-            cwd=home(), capture_output=True, timeout=3 * 3600, creationflags=flags,
-            stdin=subprocess.DEVNULL,
-        )
-        out = proc.stdout.decode("utf-8", errors="replace").strip()
-        err = proc.stderr.decode("utf-8", errors="replace").strip()
-        log(f"claude exited {proc.returncode}\n{out}" + (f"\nstderr: {err[-2000:]}" if err else ""))
-        return proc.returncode
+        return run_claude(prompt)
     except Exception as exc:  # the scheduler shows nothing; the log is the only trace
         log(f"error: {exc!r}")
         return 1
