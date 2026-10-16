@@ -17,6 +17,7 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `video_info` | Full metadata of one video — reuse its tid / tags / source as a template |
 | `zones` | Zone list (分区) with `tid` values |
 | `trending` | What's hot site-wide right now (排行榜 + 综合热门 + 每周必看, ~230 titles) for studying title patterns |
+| `memes` | Meme templates (梗/定型文) spreading right now: candidates from 梗百科-style explainer videos, ranked by how many uploads of the last 48 h reuse them, with top examples (cached 3 h) |
 
 ### Queue and subscriptions
 

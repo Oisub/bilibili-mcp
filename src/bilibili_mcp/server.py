@@ -101,10 +101,11 @@ def load_cookies() -> dict[str, str]:
     return jar
 
 
-def web_get(url: str, params: dict[str, Any] | None = None) -> Any:
-    """GET a Bilibili web API with the saved cookies and unwrap ``data``."""
-    headers = {"User-Agent": UA, "Referer": "https://member.bilibili.com/"}
-    with httpx.Client(cookies=load_cookies(), headers=headers, timeout=20) as client:
+def web_get(url: str, params: dict[str, Any] | None = None, *, cookies: dict[str, str] | None = None,
+            referer: str = "https://member.bilibili.com/") -> Any:
+    """GET a Bilibili web API with the saved cookies (plus ``cookies``) and unwrap ``data``."""
+    headers = {"User-Agent": UA, "Referer": referer}
+    with httpx.Client(cookies={**load_cookies(), **(cookies or {})}, headers=headers, timeout=20) as client:
         resp = client.get(url, params=params)
         resp.raise_for_status()
         body = resp.json()
@@ -123,7 +124,7 @@ _WBI_MIXIN = [
 ]
 
 
-def wbi_get(url: str, params: dict[str, Any]) -> Any:
+def wbi_get(url: str, params: dict[str, Any], **kwargs: Any) -> Any:
     """`web_get` with a WBI signature (``w_rid`` / ``wts``) added to the query."""
     import hashlib
     from urllib.parse import urlencode
@@ -134,7 +135,7 @@ def wbi_get(url: str, params: dict[str, Any]) -> Any:
     signed = {**params, "wts": int(time.time())}
     signed = {k: re.sub(r"[!'()*]", "", str(v)) for k, v in sorted(signed.items())}
     signed["w_rid"] = hashlib.md5((urlencode(signed) + key).encode()).hexdigest()  # noqa: S324 - protocol-mandated
-    return web_get(url, signed)
+    return web_get(url, signed, **kwargs)
 
 
 def whoami() -> dict[str, Any]:
@@ -590,6 +591,111 @@ def trending(sources: list[str] | None = None, popular_pages: int = 2, rid: int 
                         {"number": latest["number"]}).get("list") or [], "weekly")
     return {"fetched": datetime.now().isoformat(timespec="minutes"), "count": len(rows), **meta,
             "videos": list(rows.values())}
+
+
+# Meme templates rarely reach the ranking as one big video; they show up as explainer
+# videos ("X是什么梗") and as a flood of fresh uploads reusing the phrase.
+_MEME_EXPLAINER_KEYWORDS = ["是什么梗", "梗百科", "梗知识", "梗指南"]
+_MEME_PATTERNS = [
+    re.compile(r"([^【】\s#？?！!，,。：:]{2,20}?)[”\"」』]?\s*(?:到底)?是(?:什么|啥)梗"),
+    re.compile(r"【[^】]*梗(?:知识|百科|指南|人物)】\s*[“\"「『]?([^？?！!，,。#【\s”」』]{2,20})"),
+    re.compile(r"梗(?:百科|库|知识|指南)之[：:]\s*[“\"「『]?([^？?！!，,。#\s”」』]{2,20})"),
+]
+_MEME_EXPLAINER = re.compile(r"是(?:什么|啥)梗|梗(?:百科|知识|指南|科普|库)")
+_PLACEHOLDER = re.compile(r"X{2,}|x{2,}|ＸＸ")
+
+
+_buvid: dict[str, str] = {}
+
+
+def _search(keyword: str, order: str, days: int | None = None, page: int = 1) -> dict[str, Any]:
+    """Video search. Search is risk-controlled: it wants a buvid3 device cookie and paced
+    requests, and answers a bare ``v_voucher`` (captcha demand) when it is unhappy."""
+    if not _buvid:
+        spi = web_get("https://api.bilibili.com/x/frontend/finger/spi")
+        _buvid.update(buvid3=spi["b_3"], buvid4=spi["b_4"])
+    params: dict[str, Any] = {"search_type": "video", "keyword": keyword, "order": order, "page": page}
+    if days:
+        now = int(time.time())
+        params |= {"pubtime_begin_s": now - days * 86400, "pubtime_end_s": now}
+    data = wbi_get("https://api.bilibili.com/x/web-interface/wbi/search/type", params,
+                   cookies=_buvid, referer="https://search.bilibili.com/")
+    if "v_voucher" in data and "result" not in data:
+        raise ToolError("Bilibili search is rate-limited (v_voucher); wait a few minutes and retry.")
+    time.sleep(0.8)
+    for v in data.get("result") or []:
+        v["title"] = re.sub(r"<[^>]+>", "", v.get("title", ""))
+    return data
+
+
+def _search_videos(keyword: str, order: str, days: int | None = None, page: int = 1) -> list[dict[str, Any]]:
+    return _search(keyword, order, days, page).get("result") or []
+
+
+def _meme_phrase(title: str) -> str | None:
+    for pat in _MEME_PATTERNS:
+        m = pat.search(title)
+        if m:
+            phrase = re.sub(r"^[【\[].*?[】\]]", "", m.group(1)).strip("“”\"「」『』'‘’ ")
+            if len(phrase) >= 2 and not _MEME_EXPLAINER.search(phrase):
+                return phrase
+    return None
+
+
+@mcp.tool(annotations=READ_ONLY)
+def memes(days: int = 60, check: int = 30, refresh: bool = False) -> dict[str, Any]:
+    """Meme templates (定型文/梗) spreading on Bilibili right now, ranked by how many new videos reuse them.
+
+    Candidates come from meme-explainer videos of the last `days` days (是什么梗/梗百科/梗知识/梗指南,
+    most-watched first); each is then searched among uploads of the last 48 hours. `uses_48h`
+    estimates how many of those titles contain the phrase — the real sign a template is alive
+    now, unlike explainer views, which lag. `examples` are the most-played of those reuses: read
+    them for the template's actual shape (e.g. "根本没有这样的X，你只是怕了"). `check`: how many
+    candidates to test. Search is rate-limited (a run makes about 12 + `check` requests), so
+    results are cached for 3 hours; `refresh=True` ignores the cache.
+    """
+    cache = home() / "memes_cache.json"
+    if not refresh and cache.exists() and time.time() - cache.stat().st_mtime < 3 * 3600:
+        cached = json.loads(cache.read_text(encoding="utf-8"))
+        if cached.get("params") == [days, check]:
+            return {**cached["result"], "cached": True}
+    candidates: dict[str, dict[str, Any]] = {}
+    for kw in _MEME_EXPLAINER_KEYWORDS:
+        for page in (1, 2, 3):
+            for v in _search_videos(kw, "click", days, page):
+                phrase = _meme_phrase(v["title"])
+                if not phrase:
+                    continue
+                key = _PLACEHOLDER.sub("", phrase).lower()
+                c = candidates.setdefault(key, {"meme": phrase, "explainer_views": 0, "explainer": v["title"]})
+                c["explainer_views"] += v.get("play") or 0
+
+    results: list[dict[str, Any]] = []
+    note = None
+    for c in sorted(candidates.values(), key=lambda c: -c["explainer_views"])[:max(1, min(check, 60))]:
+        core = _PLACEHOLDER.sub("", c["meme"]).strip("的 ")
+        needle = re.sub(r"\s+", "", core).lower()
+        if len(needle) < 2:
+            continue
+        try:
+            data = _search(core, "click", days=2)
+        except ToolError as e:
+            note = f"stopped after {len(results)} candidates: {e}"
+            break
+        page = data.get("result") or []
+        hits = [v for v in page if needle in re.sub(r"\s+", "", v["title"]).lower()
+                and not _MEME_EXPLAINER.search(v["title"])]
+        # Search matches loosely; scale the 48h total by the share of exact reuses on page 1.
+        uses = round((data.get("numResults") or 0) * len(hits) / len(page)) if page else 0
+        results.append({**c, "uses_48h": uses,
+                        "examples": [f'{v["title"]} ({v.get("play")})' for v in hits[:5]]})
+    results.sort(key=lambda r: (-r["uses_48h"], -r["explainer_views"]))
+    result = {"fetched": datetime.now().isoformat(timespec="minutes"), **({"note": note} if note else {}),
+              "memes": results}
+    if not note:
+        cache.write_text(json.dumps({"params": [days, check], "result": result}, ensure_ascii=False),
+                         encoding="utf-8")
+    return result
 
 
 @mcp.tool(annotations=READ_ONLY)

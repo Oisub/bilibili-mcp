@@ -44,7 +44,7 @@ to claim below, in order:
    folder under the working directory's `work/` folder. If YouTube returns 403, upgrade
    yt-dlp (`python -m pip install -U "yt-dlp[default]"`) and retry.
 4. Write the metadata following channel_style.md in the working directory, if present
-   (including its title workflow with mcp__bilibili__trending), and upload it with
+   (including its title workflow with mcp__bilibili__memes and mcp__bilibili__trending), and upload it with
    mcp__bilibili__upload_video as a repost with the YouTube URL as source.
 5. Wait for mcp__bilibili__upload_status to report done, verify with video_info, then call
    queue_finish with status=done and the bvid. On any failure call queue_finish with
