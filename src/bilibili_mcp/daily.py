@@ -1,14 +1,15 @@
 """Scheduled job: poll subscriptions, then let a headless Claude Code post.
 
-Run by the OS scheduler every hour (Windows Task Scheduler), e.g.
-``pythonw -m bilibili_mcp.daily``. Each run:
+Run by the OS scheduler once a day at a quiet hour (Windows Task Scheduler,
+04:00), e.g. ``pythonw -m bilibili_mcp.daily``. Each run:
 
 * syncs the queue playlist (the user's YouTube playlist of videos to post);
 * polls the followed YouTube channels and queues their new videos;
 * records performance snapshots of posted videos (feedback.collect);
-* posts every queued **subscription** video right away (no daily limit);
-* from POST_HOUR on, posts manually queued videos up to the weekday's limit
-  (upload_queue.WEEKLY_AUTO_LIMITS: none Mon-Thu, two Fri/Sat, one Sun);
+* posts every queued **subscription** video (no daily limit) and manually queued
+  videos up to the weekday's limit (upload_queue.WEEKLY_AUTO_LIMITS: none
+  Mon-Thu, two Fri/Sat, one Sun), scheduled to go public at PUBLISH_HOUR that
+  day (Bilibili 定时发布), or right away when the run starts too late for that;
 * on a run with nothing to post, about once a week when enough videos have
   matured, runs a feedback review: Claude reads the stats and may adjust the
   style guide's feedback section within the bounds written there.
@@ -30,13 +31,16 @@ import os
 import shutil
 import subprocess
 import sys
-from datetime import datetime
+from datetime import datetime, timedelta
 
 from bilibili_mcp import feedback, upload_queue
 from bilibili_mcp.server import feedback_store, home, store, web_get
 
-# Manually queued videos are posted from this local hour on (on allowed weekdays).
-POST_HOUR = int(os.environ.get("BILIBILI_MCP_POST_HOUR", "18"))
+# Videos uploaded by the run go public at this local hour the same day.
+PUBLISH_HOUR = int(os.environ.get("BILIBILI_MCP_PUBLISH_HOUR", "18"))
+# Bilibili wants a scheduled publish time at least 4 hours ahead; keep a margin
+# for the downloads and uploads that happen before upload_video is called.
+SCHEDULE_MARGIN = timedelta(hours=6)
 
 BASE_PROMPT = """\
 You are the scheduled uploader for this Bilibili channel. For each queue item you are told
@@ -97,10 +101,17 @@ def plan(data: dict, now: datetime) -> list[str]:
     lines = [f"- item {i['id']} ({i['url']}): queue_claim(auto=false, item_id=\"{i['id']}\")"
              for i in pending if i["origin"].startswith("subscription:")]
     manual = [i for i in pending if not i["origin"].startswith("subscription:")]
-    if now.hour >= POST_HOUR:
-        slots = upload_queue.daily_auto_limit(now) - upload_queue.auto_posts_today(data)
-        lines += ["- the oldest manually queued item: queue_claim(auto=true)"] * min(slots, len(manual))
+    slots = upload_queue.daily_auto_limit(now) - upload_queue.auto_posts_today(data)
+    lines += ["- the oldest manually queued item: queue_claim(auto=true)"] * min(slots, len(manual))
     return lines
+
+
+def publish_note(now: datetime) -> str:
+    """When the run's uploads should go public."""
+    at = now.replace(hour=PUBLISH_HOUR, minute=0, second=0, microsecond=0)
+    if at - now < SCHEDULE_MARGIN:
+        return "Publish each upload right away (leave publish_at empty).\n"
+    return f'Pass publish_at="{at:%Y-%m-%d %H:%M}" to upload_video so every upload goes public then.\n'
 
 
 def run_claude(prompt: str) -> int:
@@ -155,7 +166,8 @@ def run(dry_run: bool = False) -> int:
                 log(f"feedback: {json.dumps(snap)}")
         except Exception as exc:  # stats are a side task; never block posting
             log(f"feedback error: {exc!r}")
-        claims = plan(store().load(), datetime.now())
+        now = datetime.now()
+        claims = plan(store().load(), now)
         if not claims:
             if feedback.review_due(feedback_store()):
                 if dry_run:
@@ -165,6 +177,7 @@ def run(dry_run: bool = False) -> int:
             return 0
         prompt_file = home() / "daily_prompt.md"
         prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else BASE_PROMPT
+        prompt += "\n" + publish_note(now)
         prompt += "\nItems to claim in this run:\n" + "\n".join(claims) + "\n"
         log("posting:\n" + "\n".join(claims))
         if dry_run:

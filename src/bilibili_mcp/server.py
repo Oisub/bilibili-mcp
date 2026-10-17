@@ -751,7 +751,7 @@ def feedback_store() -> feedback.Store:
 def feedback_report(days: int = 90) -> dict[str, Any]:
     """How posted videos performed, for learning which titles work.
 
-    Refreshes the counters first (the daily job also does this hourly). Each video posted in the
+    Refreshes the counters first (the daily job also does this once a day). Each video posted in the
     last `days` days shows views at 24h / 72h / 7d / 30d, `vs_median` (views at its latest
     milestone / channel median at that milestone), `engagement` ((like+coin+fav)/view), and its
     title `style` / `meme` as recorded by `feedback_tag`; `groups` gives medians per style and
@@ -858,7 +858,7 @@ def queue_playlist(playlist: str = "") -> dict[str, Any]:
 
     playlist: a playlist URL or id to (re)link it; empty just syncs the linked one.
     New videos in the playlist are queued, its order is the posting order, and pending
-    items removed from it leave the queue. The daily job syncs every hour.
+    items removed from it leave the queue. The daily job syncs once a day.
     """
     if playlist:
         return upload_queue.set_playlist(store(), playlist)

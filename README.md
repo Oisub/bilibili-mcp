@@ -48,13 +48,15 @@ days), create an OAuth client of type *Desktop app*, download its JSON to
 State is `~/.bilibili-mcp/queue.json`. A subscription only queues videos published
 after it was added.
 
-**Scheduled job** — `python -m bilibili_mcp.daily`, run hourly (e.g. Windows Task
+**Scheduled job** — `python -m bilibili_mcp.daily`, run once a day at a quiet hour (e.g. 04:00 via Windows Task
 Scheduler with `pythonw.exe` so no window opens). It syncs the queue playlist, polls subscriptions and, when
 there is something to post, runs a headless `claude -p` that claims, writes the
 metadata, uploads and finishes each item:
-- videos from subscribed channels are posted as soon as they are found, no limit;
-- manually queued videos are posted from `BILIBILI_MCP_POST_HOUR` (default 18), up to a per-weekday limit
-  (`WEEKLY_AUTO_LIMITS`: none Monday–Thursday, two on Friday and Saturday, one on Sunday).
+- videos from subscribed channels are all posted, no limit;
+- manually queued videos are posted up to a per-weekday limit
+  (`WEEKLY_AUTO_LIMITS`: none Monday–Thursday, two on Friday and Saturday, one on Sunday);
+- uploads are scheduled (`publish_at`) to go public at `BILIBILI_MCP_PUBLISH_HOUR` (default 18)
+  that day, or right away when the run starts too late for that.
 Every run also snapshots the counters of posted videos at 24h / 72h / 7d / 30d
 (`~/.bilibili-mcp/feedback.json`). About once a week, on a run with nothing to post and
 at least 3 newly matured videos, a headless review reads `feedback_report` and may edit

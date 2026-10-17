@@ -1,6 +1,6 @@
 """Performance feedback for posted videos.
 
-The daily job calls ``collect`` every hour: one creator-center request per 50
+The daily job calls ``collect`` on every (daily) run: one creator-center request per 50
 videos returns every video's counters, and each video gets a snapshot when it
 passes a milestone age (MILESTONES), so videos can be compared at the same age.
 Videos already older than the tracking window when first seen (the back
