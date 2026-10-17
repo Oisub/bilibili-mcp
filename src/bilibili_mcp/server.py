@@ -785,11 +785,15 @@ def store() -> upload_queue.Store:
 
 
 @mcp.tool()
-def queue_add(url: str, note: str = "") -> dict[str, Any]:
+def queue_add(url: str, note: str = "", priority: bool = False) -> dict[str, Any]:
     """Add a YouTube video to the upload queue (the daily job posts queued videos only
-    Fri (2), Sat (2) and Sun (1), from the evening on). With YouTube logged in it is also
-    added to the user's queue playlist (see `queue_playlist`)."""
-    return upload_queue.add(store(), url, origin="manual", note=note)
+    Fri (2), Sat (2) and Sun (1)). With YouTube logged in it is also added to the user's
+    queue playlist (see `queue_playlist`).
+
+    priority: put it in the priority queue instead (the "B站优先队列" playlist, created on
+        first use): posted before the rest of the queue. Also promotes a pending item.
+    """
+    return upload_queue.add(store(), url, origin="manual", note=note, priority=priority)
 
 
 @mcp.tool(annotations=READ_ONLY)
@@ -803,6 +807,7 @@ def queue_list(status: str = "open") -> dict[str, Any]:
     items = [i for i in data["items"]
              if status == "all" or (status == "open" and i["status"] in open_states) or i["status"] == status]
     return {"playlist": data.get("playlist"),
+            "priority_playlist": data.get("priority_playlist"),
             "auto_posts_today": upload_queue.auto_posts_today(data),
             "daily_auto_limit": upload_queue.daily_auto_limit(),
             "weekly_auto_limits": dict(zip(("Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"),
@@ -816,8 +821,10 @@ def queue_claim(auto: bool, item_id: str = "") -> dict[str, Any]:
 
     auto=True: the scheduled daily job. Refused once today's auto limit is used.
     auto=False: the user explicitly asked to post (e.g. "投"); does not count toward the limit.
-    item_id: a specific item (also retries a failed one); empty takes the oldest pending.
-    Afterwards always call `queue_finish`.
+    item_id: a specific item (also retries a failed one); empty takes the next pending one:
+        priority items first, then playlist order.
+    An item with origin "priority" is one the user rates highly: give it the warmer title
+    treatment the style guide describes. Afterwards always call `queue_finish`.
     """
     return upload_queue.claim_next(store(), auto=auto, item_id=item_id)
 
@@ -853,15 +860,16 @@ async def youtube_login() -> dict[str, Any]:
 
 
 @mcp.tool()
-def queue_playlist(playlist: str = "") -> dict[str, Any]:
-    """Sync the queue with the user's YouTube queue playlist (public or unlisted).
+def queue_playlist(playlist: str = "", priority: bool = False) -> dict[str, Any]:
+    """Sync the queue with the user's YouTube queue and priority playlists (public or unlisted).
 
-    playlist: a playlist URL or id to (re)link it; empty just syncs the linked one.
-    New videos in the playlist are queued, its order is the posting order, and pending
+    playlist: a playlist URL or id to (re)link it; empty just syncs the linked ones.
+    priority: link `playlist` as the priority playlist (its videos are posted first).
+    New videos in a playlist are queued, its order is the posting order, and pending
     items removed from it leave the queue. The daily job syncs once a day.
     """
     if playlist:
-        return upload_queue.set_playlist(store(), playlist)
+        return upload_queue.set_playlist(store(), playlist, priority=priority)
     return upload_queue.sync_playlist(store())
 
 

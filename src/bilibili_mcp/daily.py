@@ -54,7 +54,8 @@ to claim below, in order:
    folder under the working directory's `work/` folder. If YouTube returns 403, upgrade
    yt-dlp (`python -m pip install -U "yt-dlp[default]"`) and retry.
 4. Write the metadata following channel_style.md in the working directory, if present
-   (including its title workflow with mcp__bilibili__memes and mcp__bilibili__trending), and upload it with
+   (including its title workflow with mcp__bilibili__memes and mcp__bilibili__trending, and
+   its rules for priority items when the claimed item's origin is "priority"), and upload it with
    mcp__bilibili__upload_video as a repost with the YouTube URL as source.
 5. Wait for mcp__bilibili__upload_status to report done, verify with video_info, record the
    title's style and borrowed meme with mcp__bilibili__feedback_tag, then call
@@ -102,7 +103,7 @@ def plan(data: dict, now: datetime) -> list[str]:
              for i in pending if i["origin"].startswith("subscription:")]
     manual = [i for i in pending if not i["origin"].startswith("subscription:")]
     slots = upload_queue.daily_auto_limit(now) - upload_queue.auto_posts_today(data)
-    lines += ["- the oldest manually queued item: queue_claim(auto=true)"] * min(slots, len(manual))
+    lines += ["- the next manually queued item: queue_claim(auto=true)"] * min(slots, len(manual))
     return lines
 
 

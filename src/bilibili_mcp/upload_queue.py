@@ -14,6 +14,10 @@ order, and drops pending items that were removed from it. With YouTube OAuth
 into it, and a posted video is moved to the "posted" playlist; without it the
 playlist is read by yt-dlp and must be public or unlisted.
 
+A second playlist, the priority playlist (origin "priority"), works the same
+way; its videos are handed out before the rest of the manual queue. They are
+ones the user rates highly, so the agent may title them more warmly.
+
 An item moves pending -> processing -> done | failed | skipped. Manually queued
 items are posted through ``claim_next(auto=True)``, at most daily_auto_limit()
 a day (set per weekday in WEEKLY_AUTO_LIMITS). Subscription videos, and anything the user asks to post now, are claimed
@@ -50,6 +54,10 @@ UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like 
 # Monday to Thursday, two on Friday and Saturday, one on Sunday.
 WEEKLY_AUTO_LIMITS = (0, 0, 0, 0, 2, 2, 1)
 POSTED_PLAYLIST_TITLE = "B站已投"
+PRIORITY_PLAYLIST_TITLE = "B站优先队列"
+# Store key of each linked playlist -> origin of the items it queues. Priority comes
+# last so that a video in both playlists ends up a priority item.
+PLAYLISTS = {"playlist": "playlist", "priority_playlist": "priority"}
 # A claimed item whose agent died is handed out again after this long.
 STALE_PROCESSING = timedelta(hours=3)
 
@@ -101,17 +109,35 @@ def youtube(store: Store) -> YouTube | None:
     return yt if yt.logged_in() else None
 
 
-def add(store: Store, url: str, title: str = "", origin: str = "manual", note: str = "") -> dict[str, Any]:
+def priority_playlist(store: Store, yt: YouTube) -> dict[str, Any]:
+    """The linked priority playlist, created (unlisted) on first use."""
+    pl = store.load().get("priority_playlist")
+    if not pl:
+        pl = {"id": yt.create_playlist(PRIORITY_PLAYLIST_TITLE), "title": PRIORITY_PLAYLIST_TITLE}
+        store.update(lambda data: data.update(priority_playlist=pl))
+    return pl
+
+
+def add(store: Store, url: str, title: str = "", origin: str = "manual", note: str = "",
+        priority: bool = False) -> dict[str, Any]:
     vid = video_id(url)
-    pl = store.load().get("playlist")
-    yt = youtube(store) if origin == "manual" and pl else None
-    if yt and not any(i["video_id"] == vid for i in store.load()["items"]):
-        yt.add_to_playlist(pl["id"], vid)  # the playlist stays the one place the user looks
+    data = store.load()
+    existing = next((i for i in data["items"] if i["video_id"] == vid), None)
+    yt = youtube(store) if origin == "manual" else None
+    if priority:
+        if yt and not (existing and existing["status"] not in ("pending", "failed")):
+            yt.add_to_playlist(priority_playlist(store, yt)["id"], vid)
+        origin = "priority"
+    elif yt and data.get("playlist") and not existing:
+        yt.add_to_playlist(data["playlist"]["id"], vid)  # the playlist stays the one place the user looks
         origin = "playlist"
 
     def fn(data: dict[str, Any]) -> dict[str, Any]:
         for item in data["items"]:
             if item["video_id"] == vid:
+                if priority and item["status"] in ("pending", "failed"):
+                    item.update(origin="priority", pos=-1)  # promoted: post it before the others
+                    return {**item, "duplicate": True, "promoted": True}
                 return {**item, "duplicate": True}
         item = {"id": uuid.uuid4().hex[:6], "video_id": vid, "url": watch_url(vid), "title": title,
                 "origin": origin, "note": note, "status": "pending", "added": _now()}
@@ -148,7 +174,8 @@ def claim_next(store: Store, auto: bool, item_id: str = "") -> dict[str, Any]:
         if auto and auto_posts_today(data) >= limit:
             return {"claimed": None, "reason": f"today's auto limit ({limit}) reached"}
         pending = [i for i in data["items"] if i["status"] == "pending"]
-        pending.sort(key=lambda i: i.get("pos", float("inf")))  # playlist order first, stable otherwise
+        # priority items first, then playlist order, stable otherwise
+        pending.sort(key=lambda i: (i["origin"] != "priority", i.get("pos", float("inf"))))
         if auto:  # subscription videos are posted on detection, outside the daily quota
             pending = [i for i in pending if not i["origin"].startswith("subscription:")]
         if item_id:
@@ -178,7 +205,7 @@ def finish(store: Store, item_id: str, status: str, bvid: str = "", note: str = 
         raise ToolError(f"unknown queue item: {item_id}")
 
     item = store.update(fn)
-    if status == "done" and item["origin"] == "playlist":
+    if status == "done" and item["origin"] in ("playlist", "priority"):
         try:
             item["moved_to"] = move_posted(store, item["video_id"])
         except Exception as exc:  # the upload itself succeeded; just report it
@@ -329,52 +356,58 @@ def fetch_playlist(pid: str, yt: YouTube | None = None) -> dict[str, Any]:
     return {"title": info.get("title") or "", "videos": videos}
 
 
-def set_playlist(store: Store, ref: str) -> dict[str, Any]:
+def set_playlist(store: Store, ref: str, priority: bool = False) -> dict[str, Any]:
+    key = "priority_playlist" if priority else "playlist"
     pid = playlist_id(ref)
     info = fetch_playlist(pid, youtube(store))  # fail now if it is unreadable or wrong
-    store.update(lambda data: data.update(playlist={**(data.get("playlist") or {}), "id": pid, "title": info["title"]}))
+    store.update(lambda data: data.update({key: {**(data.get(key) or {}), "id": pid, "title": info["title"]}}))
     return {"id": pid, "title": info["title"], "videos": len(info["videos"]), **sync_playlist(store)}
 
 
 def sync_playlist(store: Store) -> dict[str, Any]:
-    """Mirror the playlist into the queue: add new videos, follow its order, and drop
-    pending playlist items that are no longer in it. Posted videos may stay in the playlist."""
-    pl = store.load().get("playlist")
-    if not pl:
+    """Mirror the queue and priority playlists into the queue: add new videos, follow
+    their order, and drop pending playlist items that are in neither any more. A video
+    in the priority playlist becomes a priority item. Posted videos may stay in a playlist."""
+    linked = {key: pl for key in PLAYLISTS if (pl := store.load().get(key))}
+    if not linked:
         return {"playlist": None}
-    videos = fetch_playlist(pl["id"], youtube(store))["videos"]
-    order = {v["video_id"]: n for n, v in enumerate(videos)}
+    yt = youtube(store)
+    wanted: dict[str, tuple[str, int, str]] = {}  # video id -> (origin, pos, title)
+    for key, pl in linked.items():
+        for n, v in enumerate(fetch_playlist(pl["id"], yt)["videos"]):
+            wanted[v["video_id"]] = (PLAYLISTS[key], n, v["title"])
 
     def fn(data: dict[str, Any]) -> dict[str, Any]:
         added, removed = [], []
         known = {i["video_id"]: i for i in data["items"]}
-        for v in videos:
-            item = known.get(v["video_id"])
+        for vid, (origin, pos, title) in wanted.items():
+            item = known.get(vid)
             if item is None:
-                item = {"id": uuid.uuid4().hex[:6], "video_id": v["video_id"], "url": watch_url(v["video_id"]),
-                        "title": v["title"], "origin": "playlist", "note": "", "status": "pending", "added": _now()}
+                item = {"id": uuid.uuid4().hex[:6], "video_id": vid, "url": watch_url(vid), "title": title,
+                        "origin": origin, "note": "", "status": "pending", "added": _now()}
                 data["items"].append(item)
-                added.append({"id": item["id"], "title": v["title"]})
-            elif item["origin"] == "manual" and item["status"] == "pending":
-                item["origin"] = "playlist"  # adopted: the playlist now decides its fate
+                added.append({"id": item["id"], "title": title, "origin": origin})
+            elif item["origin"] in ("manual", *PLAYLISTS.values()) and item["status"] in ("pending", "failed"):
+                item["origin"] = origin  # adopted: the playlists now decide its fate
+            if item["status"] in ("pending", "failed"):
+                item["pos"] = pos
         for item in list(data["items"]):
-            if item["origin"] != "playlist" or item["status"] not in ("pending", "failed"):
-                continue
-            if item["video_id"] in order:
-                item["pos"] = order[item["video_id"]]
-            else:
+            if (item["origin"] in PLAYLISTS.values() and item["status"] in ("pending", "failed")
+                    and item["video_id"] not in wanted):
                 data["items"].remove(item)
                 removed.append({"id": item["id"], "video_id": item["video_id"]})
-        data["playlist"]["last_synced"] = _now()
+        for key in linked:
+            data[key]["last_synced"] = _now()
         return {"added": added, "removed": removed}
 
     return store.update(fn)
 
 
 def move_posted(store: Store, vid: str) -> str:
-    """Move a posted video from the queue playlist to the posted playlist (created on first use)."""
+    """Move a posted video from the queue playlists to the posted playlist (created on first use)."""
     yt = youtube(store)
-    pl = store.load().get("playlist")
+    data = store.load()
+    pl = data.get("playlist")
     if not yt or not pl:
         return ""
     posted = pl.get("posted_id")
@@ -382,5 +415,7 @@ def move_posted(store: Store, vid: str) -> str:
         posted = yt.create_playlist(POSTED_PLAYLIST_TITLE)
         store.update(lambda data: data["playlist"].update(posted_id=posted))
     yt.add_to_playlist(posted, vid)  # add first: a failure in between must not lose the video
-    yt.remove_from_playlist(pl["id"], vid)
+    for key in PLAYLISTS:
+        if data.get(key):
+            yt.remove_from_playlist(data[key]["id"], vid)
     return posted

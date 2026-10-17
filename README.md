@@ -30,13 +30,19 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `queue_finish` | Record the outcome: done (with bvid) / failed / skipped / pending |
 | `subscribe` / `unsubscribe` / `subscriptions` | Follow YouTube channels (URL, @handle or channel id) |
 | `check_subscriptions` | Poll followed channels (RSS) and queue new videos |
-| `queue_playlist` | Link / sync a YouTube playlist that acts as the manual queue |
+| `queue_playlist` | Link / sync the YouTube playlists that act as the manual queue and the priority queue |
 | `youtube_login` | OAuth consent for the user's YouTube playlists (optional) |
 
 The manual queue can be managed from YouTube: link a public or unlisted playlist with
 `queue_playlist(<url>)`. Videos added to it are queued, its order is the posting
 order, and pending videos removed from it leave the queue. Posted videos may stay in
 the playlist (the queue remembers them, so nothing is posted twice).
+
+A second, **priority** playlist works the same way (`queue_playlist(<url>, priority=True)`,
+or `queue_add(url, priority=True)`, which creates an unlisted "B站优先队列" playlist on first
+use with YouTube logged in). Its videos are claimed before the rest of the manual queue,
+within the same weekday limits, and come out with origin `priority` so the agent can treat
+them as picks (e.g. a warmer title).
 
 With `youtube_login` (optional) the playlist can be private, `queue_add` also adds to
 it, and each posted video is moved to a "B站已投" playlist. Setup: in Google Cloud,
