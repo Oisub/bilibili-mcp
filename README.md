@@ -12,7 +12,7 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `upload_video` | Upload + submit a new video (one file per part). Runs in the background |
 | `append_parts` | Append parts (分P) to an existing video. Runs in the background |
 | `upload_status` | Progress / result (`bvid`) of upload jobs, with a log tail |
-| `edit_video` | Change title / description / tags / part titles of a submitted video (goes back to review) |
+| `edit_video` | Change title / description / tags / part titles / cover of a submitted video (goes back to review) |
 | `my_videos` | This account's videos with review state and rejection reasons |
 | `video_info` | Full metadata of one video — reuse its tid / tags / source as a template |
 | `zones` | Zone list (分区) with `tid` values |

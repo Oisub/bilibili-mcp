@@ -20,6 +20,7 @@ This server wraps it in three ways:
 from __future__ import annotations
 
 import asyncio
+import base64
 import json
 import logging
 import os
@@ -448,6 +449,24 @@ def _show(bvid: str) -> dict[str, Any]:
     return json.loads(out[out.index("{"):])
 
 
+def _upload_cover(path: str) -> str:
+    """Upload a cover image to Bilibili and return its URL."""
+    data = Path(path).read_bytes()
+    mime = "image/png" if data[1:4] == b"PNG" else "image/jpeg"
+    csrf = load_cookies().get("bili_jct", "")
+    headers = {"User-Agent": UA, "Referer": "https://member.bilibili.com/"}
+    with httpx.Client(cookies=load_cookies(), headers=headers, timeout=60) as client:
+        resp = client.post("https://member.bilibili.com/x/vu/web/cover/up",
+                           params={"t": int(time.time() * 1000)},
+                           data={"csrf": csrf,
+                                 "cover": f"data:{mime};base64,{base64.b64encode(data).decode()}"})
+        resp.raise_for_status()
+        body = resp.json()
+    if body.get("code") != 0 or not (body.get("data") or {}).get("url"):
+        raise ToolError(f"Bilibili cover upload error {body.get('code')}: {body.get('message')}")
+    return body["data"]["url"]
+
+
 @mcp.tool()
 def edit_video(
     bvid: str,
@@ -455,13 +474,17 @@ def edit_video(
     desc: str | None = None,
     tags: list[str] | None = None,
     part_titles: list[str] | None = None,
+    cover: str | None = None,
 ) -> dict[str, Any]:
-    """Edit an already submitted video: title, description, tags or part titles.
+    """Edit an already submitted video: title, description, tags, part titles or cover.
 
     Only the given fields change. An edit sends the video back into review.
     For a repost, write `desc` without the source link: Bilibili adds it itself.
     part_titles: one per existing part, in order.
+    cover: local image path (JPEG/PNG, 16:9, e.g. a frame grabbed with ffmpeg).
     """
+    if cover is not None and not Path(cover).is_file():
+        raise ToolError(f"cover image not found: {cover}")
     data = _show(bvid)
     arc = data["archive"]
     parts = data.get("videos") or []
@@ -480,7 +503,7 @@ def edit_video(
         "tag": ",".join(tags) if tags is not None else arc.get("tag", ""),
         "copyright": arc["copyright"],
         "source": arc.get("source", ""),
-        "cover": arc.get("cover", ""),
+        "cover": _upload_cover(cover) if cover is not None else arc.get("cover", ""),
         "desc": new_desc,
         "desc_format_id": arc.get("desc_format_id", 0),
         "dynamic": arc.get("dynamic", ""),
@@ -507,7 +530,8 @@ def edit_video(
     if body.get("code") != 0:
         raise ToolError(f"Bilibili edit error {body.get('code')}: {body.get('message')}")
     return {"bvid": bvid, "edited": [k for k, v in
-            {"title": title, "desc": desc, "tags": tags, "part_titles": part_titles}.items() if v is not None],
+            {"title": title, "desc": desc, "tags": tags, "part_titles": part_titles,
+             "cover": cover}.items() if v is not None],
             "hint": "The edit goes back through review; check with video_info."}
 
 
