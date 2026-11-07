@@ -340,6 +340,29 @@ def _titled_parts(paths: list[str], part_titles: list[str] | None) -> tuple[list
     return out, folder
 
 
+YOUTUBE_ID_RE = re.compile(
+    r"(?:youtube\.com/(?:watch\?(?:.*&)?v=|shorts/|live/|embed/)|youtu\.be/)([0-9A-Za-z_-]{11})")
+
+
+def _youtube_thumbnail(source: str) -> str:
+    """Download the YouTube thumbnail of `source` as the cover; "" if it is not YouTube.
+
+    A repost's cover should match the original video's, not a random frame."""
+    m = YOUTUBE_ID_RE.search(source or "")
+    if not m:
+        return ""
+    vid = m.group(1)
+    with httpx.Client(headers={"User-Agent": UA}, timeout=30, follow_redirects=True) as client:
+        for name in ("maxresdefault", "sddefault", "hqdefault"):
+            resp = client.get(f"https://i.ytimg.com/vi/{vid}/{name}.jpg")
+            # A missing size answers 404 (or a tiny grey placeholder).
+            if resp.status_code == 200 and len(resp.content) > 5000:
+                path = jobs_dir() / f"cover-{vid}.jpg"
+                path.write_bytes(resp.content)
+                return str(path)
+    raise ToolError(f"could not download the YouTube thumbnail of {vid}; pass `cover` explicitly")
+
+
 # -------------------------------------------------------------------- upload
 
 
@@ -369,7 +392,9 @@ def upload_video(
     files: local video paths; each file becomes one part (分P), in order.
     tid: zone id (分区) - look it up with `zones`.
     tags: 1-12 tags.
-    cover: local image path; empty lets Bilibili pick a frame.
+    cover: local image path. Empty with a YouTube `source`: the YouTube thumbnail is
+        downloaded and used, so the cover matches the original. Otherwise empty lets
+        Bilibili pick a frame.
     copyright: 1 = original (自制), 2 = repost (转载, needs `source`).
     publish_at: scheduled publish time, local ISO format like "2026-10-20 20:00";
         must be at least 4 hours ahead. Empty publishes as soon as review passes.
@@ -388,6 +413,8 @@ def upload_video(
     _check_desc_length(desc, source if copyright == 2 else "")
     if not part_titles and len(paths) == 1:
         part_titles = [title[:80]]
+    if not cover and source:
+        cover = _youtube_thumbnail(source)
     args = ["upload", *_metadata_args(title, tid, tags, desc, cover, copyright, source,
                                        publish_at, private, dynamic, no_reprint, tid_v2)]
     if line:
@@ -481,8 +508,14 @@ def edit_video(
     Only the given fields change. An edit sends the video back into review.
     For a repost, write `desc` without the source link: Bilibili adds it itself.
     part_titles: one per existing part, in order.
-    cover: local image path (JPEG/PNG, 16:9, e.g. a frame grabbed with ffmpeg).
+    cover: local image path (JPEG/PNG, 16:9), or "youtube" to use the YouTube thumbnail
+        of the video's source link.
     """
+    if cover == "youtube":
+        arc_source = _show(bvid)["archive"].get("source", "")
+        cover = _youtube_thumbnail(arc_source)
+        if not cover:
+            raise ToolError(f"{bvid} has no YouTube source link")
     if cover is not None and not Path(cover).is_file():
         raise ToolError(f"cover image not found: {cover}")
     data = _show(bvid)

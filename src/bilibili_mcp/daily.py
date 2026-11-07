@@ -50,13 +50,14 @@ to claim below, in order:
 2. Inspect the YouTube video with yt-dlp (`yt-dlp --no-update --no-playlist -J <url>`).
    If it is not worth posting (a Short, a trailer without music, an upcoming premiere,
    off-topic), call queue_finish with status=skipped and a reason, and move on.
-3. Download it (1080p H.264 + m4a merged to mp4, plus the thumbnail as jpg) into a new
+3. Download it (1080p H.264 + m4a merged to mp4) into a new
    folder under the working directory's `work/` folder. If YouTube returns 403, upgrade
    yt-dlp (`python -m pip install -U "yt-dlp[default]"`) and retry.
 4. Write the metadata following channel_style.md in the working directory, if present
    (including its title workflow with mcp__bilibili__memes and mcp__bilibili__trending, and
    its rules for priority items when the claimed item's origin is "priority"), and upload it with
-   mcp__bilibili__upload_video as a repost with the YouTube URL as source.
+   mcp__bilibili__upload_video as a repost with the YouTube URL as source. Leave `cover`
+   empty: upload_video then uses the YouTube thumbnail, so the cover matches the original.
 5. Wait for mcp__bilibili__upload_status to report done, verify with video_info, record the
    title's style and borrowed meme with mcp__bilibili__feedback_tag, then call
    queue_finish with status=done and the bvid. On any failure call queue_finish with
