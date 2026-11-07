@@ -12,6 +12,8 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `upload_video` | Upload + submit a new video (one file per part). Runs in the background |
 | `append_parts` | Append parts (分P) to an existing video. Runs in the background |
 | `upload_status` | Progress / result (`bvid`) of upload jobs, with a log tail |
+| `fetch_captions` | Original captions of a YouTube video (uploaded, else automatic) as a cue list, for translating into a Chinese SRT |
+| `burn_subtitles` | Render an SRT onto a video with ffmpeg (硬字幕, libass, Microsoft YaHei). Runs in the background like an upload |
 | `edit_video` | Change title / description / tags / part titles / cover of a submitted video (goes back to review) |
 | `my_videos` | This account's videos with review state and rejection reasons |
 | `video_info` | Full metadata of one video — reuse its tid / tags / source as a template |
@@ -112,3 +114,9 @@ A newly added server only shows up after restarting the Claude Code session.
 - "done" in `upload_status` means the submission was accepted; the video still
   goes through review. Check `my_videos` for the outcome.
 - biliup cannot delete videos; delete test uploads in the creator center.
+- Subtitles are burned in rather than uploaded as a CC track: CC needs the part's
+  `cid` after transcoding and goes through a second review, and app viewers rarely
+  turn it on. ffmpeg runs with the SRT's folder as cwd because the `subtitles`
+  filter cannot take a Windows path with a drive colon.
+- With an empty `cover` and a YouTube `source`, `upload_video` uses the YouTube
+  thumbnail as the cover (`edit_video(cover="youtube")` does the same afterwards).

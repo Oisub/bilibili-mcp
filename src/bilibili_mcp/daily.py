@@ -53,6 +53,10 @@ to claim below, in order:
 3. Download it (1080p H.264 + m4a merged to mp4) into a new
    folder under the working directory's `work/` folder. If YouTube returns 403, upgrade
    yt-dlp (`python -m pip install -U "yt-dlp[default]"`) and retry.
+   If the video is talk-heavy (an interview, masterclass, talk or documentary in a
+   foreign language), give it Chinese subtitles: mcp__bilibili__fetch_captions, translate
+   the cues into a Chinese SRT at its srt_path (rules in channel_style.md), then
+   mcp__bilibili__burn_subtitles and upload the burned file instead.
 4. Write the metadata following channel_style.md in the working directory, if present
    (including its title workflow with mcp__bilibili__memes and mcp__bilibili__trending, and
    its rules for priority items when the claimed item's origin is "priority"), and upload it with

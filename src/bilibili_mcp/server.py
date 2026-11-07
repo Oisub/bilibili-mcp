@@ -209,13 +209,15 @@ def _read_log(job_id: str) -> str:
     return ANSI_RE.sub("", path.read_bytes().decode("utf-8", errors="replace"))
 
 
-def _start_job(kind: str, args: list[str], summary: dict[str, Any], cleanup: Path | None = None) -> dict[str, Any]:
+def _start_job(kind: str, args: list[str], summary: dict[str, Any], cleanup: Path | None = None,
+               cmd: list[str] | None = None, cwd: Path | None = None) -> dict[str, Any]:
+    """Run biliup with `args` (or any other `cmd`) in the background, tracked as a job."""
     job_id = datetime.now().strftime("%y%m%d-%H%M%S-") + uuid.uuid4().hex[:4]
     log = open(jobs_dir() / f"{job_id}.log", "wb")  # noqa: SIM115 - closed by the watcher thread
-    cmd = [biliup_exe(), "-u", str(cookie_file()), *args]
+    cmd = cmd or [biliup_exe(), "-u", str(cookie_file()), *args]
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     proc = subprocess.Popen(  # noqa: S603
-        cmd, cwd=home(), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
+        cmd, cwd=cwd or home(), stdout=log, stderr=subprocess.STDOUT, stdin=subprocess.DEVNULL,
         env={**os.environ, "NO_COLOR": "1"}, creationflags=flags,
     )
     meta = {"job_id": job_id, "kind": kind, "status": "running", "pid": proc.pid,
@@ -438,6 +440,53 @@ def append_parts(bvid: str, files: list[str], line: str = "", part_titles: list[
     upload_paths, tmp = _titled_parts(paths, part_titles)
     meta = _start_job("append", [*args, *upload_paths], {"bvid": bvid, "files": paths}, tmp)
     return {"job_id": meta["job_id"], "status": "running"}
+
+
+@mcp.tool()
+def fetch_captions(url: str, lang: str = "") -> dict[str, Any]:
+    """Fetch a YouTube video's original captions for translating into Chinese subtitles.
+
+    For talk-heavy reposts (interviews, masterclasses). Takes the uploaded captions
+    when the video has them, else YouTube's automatic ones (no punctuation, split
+    mid-sentence). lang: spoken language code (en, ja, ...); empty = the video's own.
+    Writes `path`: one cue per line, `HH:MM:SS,mmm --> HH:MM:SS,mmm | text`.
+    Translate it into an SRT file at `srt_path` (merge fragments into sentences, keep
+    the timing), then call `burn_subtitles`. `srt_exists`: a translation from an
+    earlier run is already there; check and reuse it.
+    """
+    from bilibili_mcp import subtitles
+
+    try:
+        return subtitles.captions(url, lang, jobs_dir() / "subs")
+    except subtitles.CaptionError as exc:
+        raise ToolError(str(exc)) from exc
+
+
+@mcp.tool()
+def burn_subtitles(video: str, srt: str, out: str = "") -> dict[str, Any]:
+    """Render a Chinese SRT onto a video (硬字幕) with ffmpeg. Runs in the background;
+    poll with `upload_status`, then upload the `out` file.
+
+    out: output path; empty = `<video name>.zh.mp4` next to the video.
+    Re-encodes the picture (H.264, CRF 20), keeps the audio as is.
+    """
+    from bilibili_mcp import subtitles
+
+    v, s = Path(video), Path(srt)
+    if not v.is_file():
+        raise ToolError(f"video not found: {video}")
+    if not s.is_file():
+        raise ToolError(f"srt not found: {srt}")
+    try:
+        cues = subtitles.parse_srt(s.read_text(encoding="utf-8-sig"))
+        dst = Path(out) if out else v.with_name(v.stem + ".zh.mp4")
+        cmd = subtitles.burn_command(v.resolve(), s.resolve(), dst.resolve())
+    except subtitles.CaptionError as exc:
+        raise ToolError(str(exc)) from exc
+    meta = _start_job("burn", [], {"title": v.name, "files": [str(v)], "out": str(dst.resolve()),
+                                   "cues": len(cues)}, cmd=cmd, cwd=s.resolve().parent)
+    return {"job_id": meta["job_id"], "status": "running", "out": meta["out"], "cues": len(cues),
+            "hint": "Poll upload_status; when done, upload `out`."}
 
 
 @mcp.tool(annotations=READ_ONLY)
