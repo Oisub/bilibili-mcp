@@ -29,8 +29,10 @@ from __future__ import annotations
 import json
 import os
 import shutil
+import socket
 import subprocess
 import sys
+import time
 from datetime import datetime, timedelta
 
 from bilibili_mcp import feedback, upload_queue
@@ -120,6 +122,23 @@ def publish_note(now: datetime) -> str:
     return f'Pass publish_at="{at:%Y-%m-%d %H:%M}" to upload_video so every upload goes public then.\n'
 
 
+NETWORK_HOSTS = ("www.youtube.com", "api.anthropic.com", "member.bilibili.com")
+
+
+def wait_for_network(limit: float = 30 * 60, step: float = 30) -> bool:
+    """After a wake from sleep the network can take minutes to come up; wait for DNS."""
+    deadline = time.monotonic() + limit
+    while True:
+        try:
+            for host in NETWORK_HOSTS:
+                socket.getaddrinfo(host, 443)
+            return True
+        except OSError:
+            if time.monotonic() >= deadline:
+                return False
+            time.sleep(step)
+
+
 def run_claude(prompt: str) -> int:
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
     proc = subprocess.run(  # noqa: S603
@@ -157,6 +176,9 @@ def run(dry_run: bool = False) -> int:
         fd = os.open(lock, os.O_CREAT | os.O_EXCL | os.O_WRONLY)
     os.close(fd)
     try:
+        if not wait_for_network():
+            log("no network after 30 min; skipping this run")
+            return 1
         try:
             synced = upload_queue.sync_playlist(store())
             if synced.get("added") or synced.get("removed"):
