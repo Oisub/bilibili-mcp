@@ -141,10 +141,14 @@ def wait_for_network(limit: float = 30 * 60, step: float = 30) -> bool:
 
 def run_claude(prompt: str) -> int:
     flags = subprocess.CREATE_NO_WINDOW if os.name == "nt" else 0
+    # The prompt goes in on stdin: claude.cmd is a batch file, and cmd.exe cuts an
+    # argument at its first newline. uv's venv launcher sets PYTHONHOME, which would
+    # break every Python (yt-dlp, pip) the child Claude runs.
+    env = {k: v for k, v in os.environ.items() if k not in ("PYTHONHOME", "UV_INTERNAL__PYTHONHOME", "VIRTUAL_ENV")}
     proc = subprocess.run(  # noqa: S603
-        [claude_exe(), "-p", prompt, "--allowedTools", *ALLOWED_TOOLS],
+        [claude_exe(), "-p", "--allowedTools", *ALLOWED_TOOLS],
         cwd=home(), capture_output=True, timeout=3 * 3600, creationflags=flags,
-        stdin=subprocess.DEVNULL,
+        input=prompt.encode("utf-8"), env=env,
     )
     out = proc.stdout.decode("utf-8", errors="replace").strip()
     err = proc.stderr.decode("utf-8", errors="replace").strip()
