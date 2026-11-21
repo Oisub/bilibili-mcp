@@ -22,6 +22,8 @@ MCP server for uploading videos to Bilibili (B站投稿), built on
 | `memes` | Meme templates (梗/定型文) spreading right now: candidates from 梗百科-style explainer videos, ranked by how many uploads of the last 48 h reuse them, with top examples (cached 3 h) |
 | `feedback_report` | How posted videos did: views at 24h / 72h / 7d / 30d vs the channel median, grouped by title style and meme use |
 | `feedback_tag` | After an upload, record the title's style and borrowed meme so the report can relate titles to results |
+| `comments` | Viewers' comments and replies on the channel's videos that still await a like (not liked, not the account's own, not passed over before) |
+| `like_comments` | Like comments as the uploader (UP主点赞); rpids passed as `skip` are remembered (`comments_seen.json`) and not shown again |
 
 ### Queue and subscriptions
 
@@ -65,6 +67,8 @@ metadata, uploads and finishes each item:
   (`WEEKLY_AUTO_LIMITS`: none Monday–Thursday, two on Friday and Saturday, one on Sunday);
 - uploads are scheduled (`publish_at`) to go public at `BILIBILI_MCP_PUBLISH_HOUR` (default 18)
   that day, or right away when the run starts too late for that.
+Every run also checks for new comments from the last 7 days; if there are any, Claude
+skims them and likes everything that is fine (inside the posting run, or a short run of its own).
 Every run also snapshots the counters of posted videos at 24h / 72h / 7d / 30d
 (`~/.bilibili-mcp/feedback.json`). About once a week, on a run with nothing to post and
 at least 3 newly matured videos, a headless review reads `feedback_report` and may edit

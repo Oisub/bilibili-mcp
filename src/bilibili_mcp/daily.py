@@ -10,6 +10,8 @@ Run by the OS scheduler once a day at a quiet hour (Windows Task Scheduler,
   videos up to the weekday's limit (upload_queue.WEEKLY_AUTO_LIMITS: none
   Mon-Thu, two Fri/Sat, one Sun), scheduled to go public at PUBLISH_HOUR that
   day (Bilibili 定时发布), or right away when the run starts too late for that;
+* likes the viewers' new comments: Claude skims them and likes everything that
+  is fine (part of the posting run, or a short run of its own);
 * on a run with nothing to post, about once a week when enough videos have
   matured, runs a feedback review: Claude reads the stats and may adjust the
   style guide's feedback section within the bounds written there.
@@ -36,7 +38,7 @@ import time
 from datetime import datetime, timedelta
 
 from bilibili_mcp import feedback, upload_queue
-from bilibili_mcp.server import feedback_store, home, store, web_get
+from bilibili_mcp.server import feedback_store, home, pending_comments, store, web_get
 
 # Videos uploaded by the run go public at this local hour the same day.
 PUBLISH_HOUR = int(os.environ.get("BILIBILI_MCP_PUBLISH_HOUR", "18"))
@@ -83,6 +85,19 @@ You are the weekly feedback reviewer for this Bilibili channel.
    showed, what you changed (quote old -> new) or why you changed nothing.
 Finish with a 2-3 line summary.
 """
+
+LIKE_PROMPT = """\
+Like the viewers' comments on this Bilibili channel as the uploader.
+Call mcp__bilibili__comments, judge each comment briefly, then call mcp__bilibili__like_comments
+once with everything that is fine in `like` and the rest's rpids in `skip`. Be generous: praise,
+questions, jokes, musical remarks and polite disagreement all get a like. Skip only spam / ads /
+bots, abuse or flaming, attacks on the musicians or other viewers, politics and other sensitive
+topics, and explicit content. Do not reply to anything.
+Finish with one line: how many liked, how many skipped and why.
+"""
+
+# Comments newer than this are considered by the daily like pass.
+LIKE_DAYS = 7
 
 ALLOWED_TOOLS = ["Bash", "Read", "Write", "Edit", "Glob", "Grep", "WebFetch", "WebSearch", "mcp__bilibili"]
 
@@ -198,19 +213,34 @@ def run(dry_run: bool = False) -> int:
                 log(f"feedback: {json.dumps(snap)}")
         except Exception as exc:  # stats are a side task; never block posting
             log(f"feedback error: {exc!r}")
+        try:
+            comments = len(pending_comments(LIKE_DAYS))
+        except Exception as exc:  # likes are a side task; never block posting
+            log(f"comments error: {exc!r}")
+            comments = 0
         now = datetime.now()
         claims = plan(store().load(), now)
         if not claims:
+            code = 0
             if feedback.review_due(feedback_store()):
                 if dry_run:
                     log("dry run: feedback review due")
-                    return 0
-                return review()
-            return 0
+                else:
+                    code = review()
+            if comments:
+                log(f"liking: {comments} new comments")
+                if dry_run:
+                    log("dry run: not starting claude")
+                else:
+                    code = run_claude(LIKE_PROMPT) or code
+            return code
         prompt_file = home() / "daily_prompt.md"
         prompt = prompt_file.read_text(encoding="utf-8") if prompt_file.exists() else BASE_PROMPT
         prompt += "\n" + publish_note(now)
         prompt += "\nItems to claim in this run:\n" + "\n".join(claims) + "\n"
+        if comments:
+            prompt += "\nAfter the items, one more task:\n" + LIKE_PROMPT
+            log(f"liking: {comments} new comments")
         log("posting:\n" + "\n".join(claims))
         if dry_run:
             log("dry run: not starting claude")

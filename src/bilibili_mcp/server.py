@@ -846,6 +846,108 @@ def my_videos(status: str = "all", page: int = 1, page_size: int = 10) -> dict[s
     return {"total": data.get("page", {}).get("count"), "videos": items}
 
 
+# --------------------------------------------------------- comments
+
+LIKE_INTERVAL = 1.5  # seconds between likes, to stay clear of risk control
+
+
+def _seen_file() -> Path:
+    return home() / "comments_seen.json"
+
+
+def _load_seen() -> dict[str, int]:
+    """rpid -> unix time it was judged (liked or passed over)."""
+    path = _seen_file()
+    return json.loads(path.read_text(encoding="utf-8")) if path.exists() else {}
+
+
+def _save_seen(seen: dict[str, int]) -> None:
+    cutoff = time.time() - 90 * 86400  # older comments drop out of `comments` anyway
+    seen = {k: v for k, v in seen.items() if v >= cutoff}
+    _seen_file().write_text(json.dumps(seen), encoding="utf-8")
+
+
+def pending_comments(days: int = 7, limit: int = 100) -> list[dict[str, Any]]:
+    """Comments on this account's videos from the last ``days`` days that are not yet
+    liked, not written by the account itself and not already judged, newest first."""
+    me = str(whoami()["mid"])
+    seen = _load_seen()
+    cutoff = time.time() - days * 86400
+    out: list[dict[str, Any]] = []
+    for page in range(1, 21):
+        data = web_get("https://api.bilibili.com/x/v2/reply/up/fulllist",
+                       {"order": 1, "filter": -1, "type": 1, "bvid": "", "pn": page, "ps": 50,
+                        "charge_plus_filter": "false"})
+        rows = data.get("list") or []
+        for r in rows:
+            if r.get("ctime", 0) < cutoff:
+                return out
+            if r.get("action") == 1 or str(r.get("mid")) == me or str(r.get("rpid")) in seen:
+                continue
+            parent = r.get("parent_info") or r.get("root_info") or {}
+            out.append({
+                "rpid": r["rpid"], "oid": r["oid"], "bvid": r.get("bvid"), "video": r.get("title"),
+                "user": (r.get("member") or {}).get("uname"),
+                "message": (r.get("content") or {}).get("message", ""),
+                "in_reply_to": ((parent.get("content") or {}).get("message") or None) if r.get("root") else None,
+                "time": datetime.fromtimestamp(r["ctime"]).isoformat(timespec="minutes"),
+            })
+            if len(out) >= limit:
+                return out
+        if len(rows) < 50:
+            break
+    return out
+
+
+@mcp.tool(annotations=READ_ONLY)
+def comments(days: int = 7, limit: int = 100) -> dict[str, Any]:
+    """Comments (and replies) on this channel's videos that still await a like.
+
+    Leaves out comments already liked, the account's own, and ones passed over before
+    via like_comments(skip=...). Judge each and call like_comments: like everything
+    that is fine; skip spam / ads / bots, abuse or flaming, attacks on the musicians or
+    other viewers, politics and other sensitive topics, explicit content.
+    """
+    items = pending_comments(days, limit)
+    return {"count": len(items), "comments": items}
+
+
+@mcp.tool()
+def like_comments(like: list[dict[str, Any]], skip: list[int] | None = None) -> dict[str, Any]:
+    """Like comments as the channel (UP主点赞) and remember the ones passed over.
+
+    like: items from `comments`, each with at least ``rpid`` and ``oid``.
+    skip: rpids judged not worth a like; `comments` will not show them again.
+    """
+    cookies = load_cookies()
+    csrf = cookies.get("bili_jct", "")
+    seen = _load_seen()
+    now = int(time.time())
+    liked, failed = [], []
+    headers = {"User-Agent": UA, "Referer": "https://www.bilibili.com/"}
+    with httpx.Client(cookies=cookies, headers=headers, timeout=20) as client:
+        for i, item in enumerate(like):
+            if i:
+                time.sleep(LIKE_INTERVAL)
+            try:
+                rpid, oid = int(item["rpid"]), int(item["oid"])
+            except (KeyError, TypeError, ValueError):
+                failed.append({"item": item, "error": "needs rpid and oid"})
+                continue
+            resp = client.post("https://api.bilibili.com/x/v2/reply/action",
+                               data={"oid": oid, "type": 1, "rpid": rpid, "action": 1, "csrf": csrf})
+            body = resp.json() if resp.status_code == 200 else {"code": resp.status_code, "message": resp.text[:200]}
+            if body.get("code") == 0:
+                liked.append(rpid)
+                seen[str(rpid)] = now
+            else:
+                failed.append({"rpid": rpid, "error": f"{body.get('code')}: {body.get('message')}"})
+    for rpid in skip or []:
+        seen[str(rpid)] = now
+    _save_seen(seen)
+    return {"liked": len(liked), "skipped": len(skip or []), "failed": failed}
+
+
 # --------------------------------------------------------- feedback
 
 
